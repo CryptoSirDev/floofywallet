@@ -129,7 +129,7 @@ class WalletWindow(QMainWindow):
         self.pages.addWidget(self.receive)
         self.send = self.make_simple_page("Send FLOOF", "Sending is disabled in this read-only preview. No private keys are stored.")
         self.pages.addWidget(self.send)
-        self.history_page = self.make_simple_page("Transaction history", "Load an address in Dashboard to see its confirmed history.")
+        self.history_page = self.make_history()
         self.pages.addWidget(self.history_page)
         self.settings = self.make_settings()
         self.pages.addWidget(self.settings)
@@ -321,6 +321,70 @@ class WalletWindow(QMainWindow):
         QApplication.clipboard().setText(self.wallet_address)
         self.receive_feedback.setText("Public address copied to clipboard.")
 
+    def make_history(self):
+        w = QWidget()
+        outer = QVBoxLayout(w)
+        outer.setContentsMargins(36, 36, 36, 36)
+        outer.setSpacing(14)
+        outer.addWidget(label("Transaction history", 26, True))
+        outer.addWidget(label("Confirmed transactions for your unlocked wallet address. Explorer data may be delayed.", 13, muted=True))
+        self.history_address = label("No wallet unlocked", 13, True)
+        outer.addWidget(self.history_address)
+        refresh = QPushButton("Refresh history")
+        refresh.setObjectName("primary")
+        refresh.clicked.connect(self.refresh_wallet_history)
+        outer.addWidget(refresh)
+        self.history_note = label("No history loaded yet.", 12, muted=True)
+        outer.addWidget(self.history_note)
+        scroll = QScrollArea()
+        scroll.setWidgetResizable(True)
+        scroll.setFrameShape(QFrame.NoFrame)
+        self.history_rows = QWidget()
+        self.history_layout = QVBoxLayout(self.history_rows)
+        self.history_layout.setContentsMargins(0, 0, 0, 0)
+        self.history_layout.setSpacing(9)
+        self.history_layout.addStretch()
+        scroll.setWidget(self.history_rows)
+        outer.addWidget(scroll, 1)
+        return w
+
+    def clear_history(self):
+        while self.history_layout.count():
+            item = self.history_layout.takeAt(0)
+            if item.widget():
+                item.widget().deleteLater()
+        self.history_layout.addStretch()
+
+    def refresh_wallet_history(self):
+        if self.wallet_address is None:
+            return
+        self.address_input.setText(self.wallet_address)
+        self.history_note.setText("Loading confirmed transactions…")
+        self.load_address()
+
+    def populate_history(self, transactions, txcount):
+        self.clear_history()
+        self.history_note.setText(
+            f"Showing {len(transactions)} confirmed transaction(s) from the first explorer page "
+            f"of {txcount} reported. Not a complete history if more exist."
+        )
+        if not transactions:
+            self.history_note.setText("No confirmed transactions on the first explorer page.")
+            return
+        for tx in sorted(transactions, key=lambda t: (t.block_height, t.timestamp, t.txid), reverse=True):
+            card = panel()
+            when = datetime.fromtimestamp(tx.timestamp, tz=timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
+            direction = "Received" if tx.amount > 0 else ("Sent" if tx.amount < 0 else "Neutral / internal")
+            card.layout().addWidget(label(f"{direction}    {tx.amount:+.8f} FLOOF", 15, True))
+            card.layout().addWidget(label(f"{when}    •    Block {tx.block_height}", 12, muted=True))
+            tx_label = label("TXID: " + tx.txid, 11)
+            tx_label.setTextInteractionFlags(Qt.TextSelectableByMouse)
+            card.layout().addWidget(tx_label)
+            copy_button = QPushButton("Copy TXID")
+            copy_button.clicked.connect(lambda checked=False, txid=tx.txid: QApplication.clipboard().setText(txid))
+            card.layout().addWidget(copy_button)
+            self.history_layout.insertWidget(self.history_layout.count() - 1, card)
+
     def make_settings(self):
         w = QWidget()
         layout = QVBoxLayout(w)
@@ -395,6 +459,9 @@ class WalletWindow(QMainWindow):
 
     def activate_wallet(self, path, address):
         self.wallet_address = address
+        self.history_address.setText("Wallet: " + address)
+        self.clear_history()
+        self.history_note.setText("Loading confirmed transactions…")
         self.wallet_status.setText("Unlocked test wallet: " + address)
         self.update_receive()
         self.address_input.setText(address)
@@ -468,6 +535,9 @@ class WalletWindow(QMainWindow):
 
     def lock_wallet(self):
         self.wallet_address = None
+        self.history_address.setText("No wallet unlocked")
+        self.clear_history()
+        self.history_note.setText("Wallet locked; history cleared.")
         self.wallet_status.setText("Wallet locked")
         self.update_receive()
         self.address_input.clear()
@@ -528,6 +598,12 @@ class WalletWindow(QMainWindow):
         self.load_button.setEnabled(True)
 
     def loaded(self, summary, history, utxos):
+        # Only show history when the response belongs to the currently unlocked wallet.
+        requested = self.worker.address if self.worker is not None else None
+        if requested == self.wallet_address and self.wallet_address is not None:
+            self.populate_history(history, summary.txcount)
+        elif self.wallet_address is not None:
+            self.history_note.setText("Dashboard address differs from your wallet. Click Refresh history.")
         self.balance_label.setText(f"{summary.balance:.8f} FLOOF")
         self.received_label.setText(f"{summary.received:.8f}")
         self.txcount_label.setText(str(summary.txcount))
@@ -544,6 +620,7 @@ class WalletWindow(QMainWindow):
 
     def load_failed(self, error):
         self.status.setText("Could not load address: " + error)
+        self.history_note.setText("Could not load explorer history: " + error)
 
 
 def main():
