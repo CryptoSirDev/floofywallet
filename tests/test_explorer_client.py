@@ -41,6 +41,20 @@ class ExplorerClientTests(unittest.TestCase):
                 with self.assertRaises(ExplorerError):
                     parse_address_summary({**SAMPLE, "txcount": value}, ADDRESS)
 
+    def test_history_and_utxo_paths(self):
+        import json
+        class Response:
+            def __enter__(self):
+                return BytesIO(json.dumps({"items": []}).encode())
+            def __exit__(self, *args):
+                return False
+        client = ExplorerClient()
+        with patch("floofywallet.explorer_client.urlopen", return_value=Response()) as mock:
+            self.assertEqual(client.get_address_transactions(ADDRESS), {"items": []})
+            self.assertTrue(mock.call_args.args[0].full_url.endswith("/txs"))
+            self.assertEqual(client.get_address_utxos(ADDRESS), {"items": []})
+            self.assertTrue(mock.call_args.args[0].full_url.endswith("/utxos"))
+
     def test_reject_http(self):
         with self.assertRaises(ValueError):
             ExplorerClient("http://explorer.floofychain.com")
