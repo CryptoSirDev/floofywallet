@@ -324,6 +324,9 @@ class WalletWindow(QMainWindow):
         self.receive_feedback.setText("Public address copied to clipboard.")
 
     def make_send(self):
+        scroll = QScrollArea()
+        scroll.setWidgetResizable(True)
+        scroll.setFrameShape(QFrame.NoFrame)
         w = QWidget()
         layout = QVBoxLayout(w)
         layout.setContentsMargins(36, 32, 36, 32)
@@ -361,7 +364,8 @@ class WalletWindow(QMainWindow):
         self.send_preview.layout().addWidget(label("No transaction preview yet.", 13, muted=True))
         layout.addWidget(self.send_preview)
         layout.addStretch()
-        return w
+        scroll.setWidget(w)
+        return scroll
 
     def preview_send(self):
         address = self.send_destination.text().strip()
