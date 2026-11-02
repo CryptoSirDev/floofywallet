@@ -346,6 +346,8 @@ class WalletWindow(QMainWindow):
         self.send_fee.setReadOnly(True)
         self.send_fee.setText("Unavailable — UTXOs and fee rate not verified")
         card.layout().addWidget(self.send_fee)
+        self.send_utxo_status = label("UTXO data: not loaded or verified", 12, muted=True)
+        card.layout().addWidget(self.send_utxo_status)
         layout.addWidget(card)
         self.send_feedback = label(
             "Network fee will be calculated automatically once verified UTXOs "
@@ -654,6 +656,7 @@ class WalletWindow(QMainWindow):
         self.send_amount.clear()
         self.send_fee.setText("Unavailable — UTXOs and fee rate not verified")
         self.send_feedback.setText("Wallet locked. Transaction preview only.")
+        self.send_utxo_status.setText("UTXO data: not loaded or verified")
         self.show_page("Welcome")
 
     def make_simple_page(self, title, description):
@@ -720,6 +723,7 @@ class WalletWindow(QMainWindow):
         self.received_label.setText(f"{summary.received:.8f}")
         self.txcount_label.setText(str(summary.txcount))
         self.utxo_count.setText(f"Unspent outputs: {len(utxos)} (spendability not verified)")
+        self.send_utxo_status.setText(f"Explorer reports {len(utxos)} UTXO(s) on its first page — not verified for spending")
         if not history:
             self.activity.setText("No confirmed transactions in the first page.")
         else:
@@ -736,6 +740,7 @@ class WalletWindow(QMainWindow):
                 self.history_note.setText("Could not load explorer history: " + error)
         elif self.requested_address == self.wallet_address:
             self.status.setText("Could not load wallet data: " + error)
+            self.send_utxo_status.setText("UTXO data unavailable — fee cannot be estimated")
             if self.history_mode == "wallet":
                 self.history_note.setText("Could not load explorer history: " + error)
 
