@@ -343,10 +343,18 @@ class WalletWindow(QMainWindow):
         self.send_destination = QLineEdit()
         self.send_destination.setPlaceholderText("FloofyChain mainnet address (F...)")
         card.layout().addWidget(self.send_destination)
+        self.destination_error = label("", 12)
+        self.destination_error.setStyleSheet("color: #b42318;")
+        card.layout().addWidget(self.destination_error)
         card.layout().addWidget(label("Amount (FLOOF)", 15, True))
         self.send_amount = QLineEdit()
         self.send_amount.setPlaceholderText("e.g. 10.00000000")
         card.layout().addWidget(self.send_amount)
+        self.amount_error = label("", 12)
+        self.amount_error.setStyleSheet("color: #b42318;")
+        card.layout().addWidget(self.amount_error)
+        self.send_destination.textChanged.connect(self.on_send_fields_changed)
+        self.send_amount.textChanged.connect(self.on_send_fields_changed)
         card.layout().addWidget(label("Estimated network fee (FLOOF)", 15, True))
         self.send_fee = QLineEdit()
         self.send_fee.setReadOnly(True)
@@ -389,7 +397,9 @@ class WalletWindow(QMainWindow):
         self.custom_fee_rate.setEnabled(False)
         fees.layout().addWidget(self.custom_fee_rate)
         self.fee_recommended.toggled.connect(self.update_fee_preview)
+        self.fee_recommended.toggled.connect(self.on_send_fields_changed)
         self.custom_fee_rate.textChanged.connect(self.update_fee_preview)
+        self.custom_fee_rate.textChanged.connect(self.on_send_fields_changed)
         self.fee_result = label("", 13, True)
         fees.layout().addWidget(self.fee_result)
         fees.layout().addWidget(label(
@@ -415,21 +425,52 @@ class WalletWindow(QMainWindow):
         except (InvalidOperation, ValueError):
             self.fee_result.setText("Enter a valid custom rate of at least 0.01000000 FLOOF/kB.")
 
+    def clear_send_preview(self):
+        box = self.send_preview.layout()
+        while box.count():
+            item = box.takeAt(0)
+            if item.widget():
+                item.widget().deleteLater()
+        box.addWidget(label("No transaction preview yet.", 13, muted=True))
+
+    def on_send_fields_changed(self, *_):
+        self.clear_send_preview()
+        self.send_feedback.setText("Enter a destination and amount, then preview the transaction.")
+        self.coin_preview.setText("Automatic coin-selection preview: waiting for a new preview.")
+        address = self.send_destination.text().strip()
+        amount_text = self.send_amount.text().strip()
+        self.destination_error.setText(
+            "Invalid FloofyChain destination address." if address and not validate_address(address) else "")
+        self.amount_error.setText("")
+        if amount_text:
+            try:
+                value = Decimal(amount_text)
+                unit = Decimal("0.00000001")
+                if not value.is_finite() or value <= 0 or value != value.quantize(unit):
+                    self.amount_error.setText("Enter a positive amount with at most 8 decimal places.")
+            except (InvalidOperation, ValueError):
+                self.amount_error.setText("Enter a valid decimal amount.")
+
     def preview_send(self):
         address = self.send_destination.text().strip()
         amount_text = self.send_amount.text().strip()
         if not validate_address(address):
-            self.send_feedback.setText("Invalid FloofyChain destination address.")
+            self.destination_error.setText("Invalid FloofyChain destination address.")
+            self.clear_send_preview()
             return
         try:
             amount = Decimal(amount_text)
         except InvalidOperation:
-            self.send_feedback.setText("Amount must be a valid decimal number.")
+            self.amount_error.setText("Enter a valid decimal amount.")
+            self.clear_send_preview()
             return
         unit = Decimal("0.00000001")
         if not amount.is_finite() or amount <= 0 or amount != amount.quantize(unit):
-            self.send_feedback.setText("Amount must be positive with at most 8 decimal places.")
+            self.amount_error.setText("Enter a positive amount with at most 8 decimal places.")
+            self.clear_send_preview()
             return
+        self.destination_error.setText("")
+        self.amount_error.setText("")
         # Exploratory calculation ONLY from the first explorer UTXO page.
         # It is not a verified balance, complete pagination, or a spendable quote.
         if self.wallet_address is None:
