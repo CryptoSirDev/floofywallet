@@ -373,19 +373,8 @@ class WalletWindow(QMainWindow):
         fees = panel()
         fees.layout().addWidget(label("Transaction Fee — TEST PREVIEW", 16, True))
         fees.layout().addWidget(label(
-            "Reference rates from FloofyChain Core 4.0.4; not a live fee recommendation. "
-            "Legacy P2PKH size approximation, with a 1-byte signature margin per input. "
-            "Inputs and outputs below are illustrative, not selected coins.", 12, muted=True))
-        fees.layout().addWidget(label("Illustrative inputs (UTXOs)", 12, True))
-        self.fee_input_count = QSpinBox()
-        self.fee_input_count.setRange(1, 100)
-        self.fee_input_count.setValue(1)
-        fees.layout().addWidget(self.fee_input_count)
-        self.fee_change_output = QCheckBox("Include change output (2 outputs)")
-        self.fee_change_output.setChecked(True)
-        fees.layout().addWidget(self.fee_change_output)
-        self.fee_input_count.valueChanged.connect(self.update_fee_preview)
-        self.fee_change_output.toggled.connect(self.update_fee_preview)
+            "Core 4.0.4 reference rate, not a live network recommendation. "
+            "The wallet handles UTXO selection internally.", 12, muted=True))
         self.fee_choice = QButtonGroup(self)
         self.fee_recommended = QRadioButton("Recommended (Core reference): 0.01000000 FLOOF/kB")
         self.fee_custom = QRadioButton("Custom fee rate (FLOOF/kB)")
@@ -419,17 +408,9 @@ class WalletWindow(QMainWindow):
             rate = Decimal(self.custom_fee_rate.text().strip()) if custom else Decimal("0.01000000")
             if not rate.is_finite() or rate < Decimal("0.01000000") or rate > Decimal("100"):
                 raise ValueError("Fee rate must be between 0.01000000 and 100 FLOOF/kB")
-            # Conservative illustrative legacy P2PKH approximation; actual signed size varies.
-            inputs = self.fee_input_count.value()
-            outputs = 2 if self.fee_change_output.isChecked() else 1
-            estimated_bytes = 10 + (148 * inputs) + (34 * outputs) + inputs
-            atomic = (Decimal(estimated_bytes) * rate * Decimal(100000000) / Decimal(1000)).to_integral_value(
-                rounding=ROUND_CEILING)
-            fee = atomic / Decimal(100000000)
             self.fee_result.setText(
-                f"Estimated size: {estimated_bytes} bytes ({inputs} input(s), {outputs} output(s))\n"
-                f"Reference rate: {rate:.8f} FLOOF/kB  |  "
-                f"Illustrative fee: {fee:.8f} FLOOF")
+                f"Selected reference rate: {rate:.8f} FLOOF/kB\\n"
+                "Transaction fee: unavailable until verified UTXOs and transaction size are known.")
         except (InvalidOperation, ValueError):
             self.fee_result.setText("Enter a valid custom rate of at least 0.01000000 FLOOF/kB.")
 
