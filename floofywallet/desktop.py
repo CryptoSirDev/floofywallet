@@ -7,14 +7,14 @@ import sys
 from io import BytesIO
 from pathlib import Path
 from datetime import datetime, timezone
-from decimal import Decimal, InvalidOperation
+from decimal import Decimal, InvalidOperation, ROUND_CEILING
 
 from PyQt5.QtCore import QObject, QThread, Qt, pyqtSignal
 from PyQt5.QtGui import QPixmap
 from PyQt5.QtWidgets import (
     QApplication, QFrame, QHBoxLayout, QLabel, QLineEdit, QMainWindow,
     QMessageBox, QPushButton, QScrollArea, QStackedWidget, QVBoxLayout, QWidget,
-    QDialog, QDialogButtonBox, QFileDialog, QFormLayout, QCheckBox,
+    QDialog, QDialogButtonBox, QFileDialog, QFormLayout, QCheckBox, QSpinBox,
 )
 
 import qrcode
@@ -363,9 +363,45 @@ class WalletWindow(QMainWindow):
         self.send_preview = panel()
         self.send_preview.layout().addWidget(label("No transaction preview yet.", 13, muted=True))
         layout.addWidget(self.send_preview)
+        simulator = panel()
+        simulator.layout().addWidget(label("Fee simulator — TEST ONLY", 16, True))
+        simulator.layout().addWidget(label(
+            "Illustrative legacy P2PKH sizes. Uses the observed Core 4.0.4 "
+            "relay fee of 0.001 FLOOF/kB, not a live network recommendation. "
+            "No real UTXOs, signatures or broadcasts.", 12, muted=True))
+        simulator.layout().addWidget(label("Simulated inputs (UTXOs)", 13, True))
+        self.sim_inputs = QSpinBox()
+        self.sim_inputs.setRange(1, 100)
+        self.sim_inputs.setValue(1)
+        simulator.layout().addWidget(self.sim_inputs)
+        simulator.layout().addWidget(label("Simulated outputs (recipient + optional change)", 13, True))
+        self.sim_outputs = QSpinBox()
+        self.sim_outputs.setRange(1, 2)
+        self.sim_outputs.setValue(2)
+        simulator.layout().addWidget(self.sim_outputs)
+        simulate = QPushButton("Calculate illustrative fee")
+        simulate.clicked.connect(self.simulate_fee)
+        simulator.layout().addWidget(simulate)
+        self.sim_result = label("Choose the number of inputs and outputs.", 13)
+        simulator.layout().addWidget(self.sim_result)
+        layout.addWidget(simulator)
         layout.addStretch()
         scroll.setWidget(w)
         return scroll
+
+    def simulate_fee(self):
+        # Legacy P2PKH approximation only: 148 bytes/input, 34/output,
+        # 10 bytes overhead. Not a serialized transaction or spendable quote.
+        inputs = self.sim_inputs.value()
+        outputs = self.sim_outputs.value()
+        size = 10 + 148 * inputs + 34 * outputs
+        rate = Decimal("0.00100000")  # FLOOF/kB observed on Core 4.0.4
+        atomic = (Decimal(size) * rate * Decimal(100000000) / Decimal(1000)).to_integral_value(
+            rounding=ROUND_CEILING)
+        fee = atomic / Decimal(100000000)
+        self.sim_result.setText(
+            f"Illustrative size: {size} bytes | Fee: {fee:.8f} FLOOF\\n"
+            "Simulation only — does not update the Send fee or authorize spending.")
 
     def preview_send(self):
         address = self.send_destination.text().strip()
