@@ -195,6 +195,38 @@ class ExplorerClient:
             raise ExplorerError("Explorer reports more UTXO pages but returned an empty page")
         return utxos, data["has_more"]
 
+    def get_all_address_utxos(self, address, *, max_pages=20, max_utxos=1000):
+        """Fetch a bounded, complete explorer UTXO listing, or fail closed.
+
+        The ?page= convention requires live API confirmation before UI integration.
+        Even a complete listing is unverified explorer data, not spendability proof.
+        """
+        if type(max_pages) is not int or not 1 <= max_pages <= 100:
+            raise ValueError("Invalid page limit")
+        if type(max_utxos) is not int or not 1 <= max_utxos <= 1000:
+            raise ValueError("Invalid UTXO limit")
+        collected = []
+        seen = set()
+        for page in range(max_pages):
+            suffix = "/utxos" if page == 0 else f"/utxos?page={page}"
+            data = self._get_address_endpoint(address, suffix)
+            batch = parse_address_utxos(data, address)
+            if data["page"] != page:
+                raise ExplorerError("Explorer returned unexpected UTXO page")
+            if data["has_more"] and not batch:
+                raise ExplorerError("Explorer returned empty nonterminal UTXO page")
+            for utxo in batch:
+                key = (utxo.txid.lower(), utxo.vout)
+                if key in seen:
+                    raise ExplorerError("Duplicate UTXO across pages")
+                seen.add(key)
+                collected.append(utxo)
+                if len(collected) > max_utxos:
+                    raise ExplorerError("UTXO count exceeds safe preview limit")
+            if not data["has_more"]:
+                return collected
+        raise ExplorerError("UTXO pagination exceeded safe page limit")
+
     def get_address_utxos(self, address):
         """Legacy first-page API; spendability is NOT established."""
         return self.get_address_utxo_snapshot(address)[0]
