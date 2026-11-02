@@ -5,6 +5,7 @@ from io import BytesIO
 
 from floofywallet.explorer_client import (
     AddressSummary, ExplorerClient, ExplorerError, parse_address_summary,
+    parse_address_transactions, parse_address_utxos,
 )
 
 ADDRESS = "FGWP1xKhDP5RmV525TmUoEwX9mTZwp3sJn"
@@ -45,15 +46,41 @@ class ExplorerClientTests(unittest.TestCase):
         import json
         class Response:
             def __enter__(self):
-                return BytesIO(json.dumps({"items": []}).encode())
+                return BytesIO(json.dumps(self.payload).encode())
             def __exit__(self, *args):
                 return False
         client = ExplorerClient()
+        Response.payload = {"address": ADDRESS, "page": 0, "limit": 30, "transactions": []}
         with patch("floofywallet.explorer_client.urlopen", return_value=Response()) as mock:
-            self.assertEqual(client.get_address_transactions(ADDRESS), {"items": []})
+            self.assertEqual(client.get_address_transactions(ADDRESS), [])
             self.assertTrue(mock.call_args.args[0].full_url.endswith("/txs"))
-            self.assertEqual(client.get_address_utxos(ADDRESS), {"items": []})
+            Response.payload = {"address": ADDRESS, "page": 0, "has_more": False, "utxos": []}
+            self.assertEqual(client.get_address_utxos(ADDRESS), [])
             self.assertTrue(mock.call_args.args[0].full_url.endswith("/utxos"))
+
+    def test_real_faucet_history_and_utxo(self):
+        address = "FAw6og7DCB6RZfWLSCwnSHwKmPt69zABCj"
+        txid = "291862035229d57377827ae7843512f7d7e6d33a49ddb4dd6a5ee05fd634e762"
+        history = {"address": address, "page": 0, "limit": 30, "transactions": [
+            {"txid": txid, "blockindex": 245990, "time": 1793614253,
+             "amount": "10.00000000", "received": "10.00000000", "sent": "0.00000000"}
+        ]}
+        utxos = {"address": address, "page": 0, "has_more": False, "utxos": [
+            {"txid": txid, "vout": 0, "height": 245990, "amount": "10.00000000"}
+        ]}
+        tx = parse_address_transactions(history, address)[0]
+        utxo = parse_address_utxos(utxos, address)[0]
+        self.assertEqual(tx.amount, Decimal("10.00000000"))
+        self.assertEqual(tx.block_height, utxo.height)
+        self.assertEqual(tx.txid, utxo.txid)
+        self.assertEqual(utxo.vout, 0)
+
+    def test_reject_invalid_utxo(self):
+        address = "FAw6og7DCB6RZfWLSCwnSHwKmPt69zABCj"
+        with self.assertRaises(ExplorerError):
+            parse_address_utxos({"address": address, "page": 0, "has_more": False,
+                                 "utxos": [{"txid": "bad", "vout": 0, "height": 1,
+                                            "amount": "10.00000000"}]}, address)
 
     def test_reject_http(self):
         with self.assertRaises(ValueError):
