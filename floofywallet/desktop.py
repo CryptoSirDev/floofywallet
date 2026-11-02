@@ -331,9 +331,8 @@ class WalletWindow(QMainWindow):
         self.wallet_status = label("No wallet opened", 14, True)
         layout.addWidget(self.wallet_status)
         for title, callback in (
-            ("Create test wallet", self.create_wallet),
-            ("Import test WIF", self.import_wallet),
-            ("Unlock encrypted wallet", self.open_wallet),
+            ("Create another test wallet", self.create_wallet),
+            ("Import another test WIF", self.import_wallet),
             ("Lock wallet", self.lock_wallet),
         ):
             button = QPushButton(title)
