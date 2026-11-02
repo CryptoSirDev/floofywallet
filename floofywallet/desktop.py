@@ -316,18 +316,32 @@ class WalletWindow(QMainWindow):
         return value
 
     def save_test_wallet(self, wif, password):
-        filename, _ = QFileDialog.getSaveFileName(self, "Save encrypted test wallet", "", "Floofy vault (*.floofvault)")
-        if not filename:
-            return False
-        path = Path(filename)
-        if path.suffix.lower() != ".floofvault":
-            path = path.with_suffix(".floofvault")
-        if path.exists():
-            QMessageBox.warning(self, "File exists", "Choose another filename. Existing vaults are never overwritten.")
-            return False
+        # Generate and encrypt once; retry only the destination filename.
         vault = encrypt_wif(wif, password)
-        save_vault(path, vault)
-        return path
+        suggested = ""
+        while True:
+            filename, _ = QFileDialog.getSaveFileName(
+                self, "Save encrypted test wallet", suggested, "Floofy vault (*.floofvault)")
+            if not filename:
+                return False
+            path = Path(filename)
+            if path.suffix.lower() != ".floofvault":
+                path = path.with_suffix(".floofvault")
+            suggested = str(path)
+            if path.exists():
+                QMessageBox.warning(
+                    self, "File exists",
+                    "This vault already exists. Please choose another filename. "
+                    "Existing vaults are never overwritten.")
+                continue
+            try:
+                save_vault(path, vault)
+            except FileExistsError:
+                QMessageBox.warning(
+                    self, "File exists",
+                    "Another file now uses this name. Choose another filename.")
+                continue
+            return path
 
     def activate_wallet(self, path, address):
         self.wallet_address = address
