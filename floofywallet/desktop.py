@@ -4,6 +4,7 @@ Run: python -m floofywallet.desktop
 Encrypted experimental test vault available; signing disabled.
 """
 import sys
+from io import BytesIO
 from pathlib import Path
 from datetime import datetime, timezone
 
@@ -14,6 +15,8 @@ from PyQt5.QtWidgets import (
     QMessageBox, QPushButton, QScrollArea, QStackedWidget, QVBoxLayout, QWidget,
     QDialog, QDialogButtonBox, QFileDialog, QFormLayout, QCheckBox,
 )
+
+import qrcode
 
 from .addresses import validate_address
 from .explorer_client import ExplorerClient, ExplorerError
@@ -257,18 +260,66 @@ class WalletWindow(QMainWindow):
     def make_receive(self):
         w = QWidget()
         layout = QVBoxLayout(w)
-        layout.setContentsMargins(36, 36, 36, 36)
+        layout.setContentsMargins(36, 30, 36, 30)
+        layout.setSpacing(15)
         layout.addWidget(label("Receive FLOOF", 26, True))
-        layout.addWidget(label("Experimental test wallets only. Never use real funds.", 13, muted=True))
+        layout.addWidget(label("Share only this public address to receive test FLOOF. Never share your WIF.", 13, muted=True))
+
+        card = panel()
+        card.layout().addWidget(label("Your unlocked wallet address", 16, True))
         self.receive_address = QLineEdit()
         self.receive_address.setReadOnly(True)
-        self.receive_address.setPlaceholderText("Create or unlock a test wallet in Settings")
-        layout.addWidget(self.receive_address)
-        copy = QPushButton("Copy public address")
-        copy.clicked.connect(lambda: QApplication.clipboard().setText(self.wallet_address or ""))
-        layout.addWidget(copy)
+        self.receive_address.setPlaceholderText("Unlock a test wallet to see its address")
+        card.layout().addWidget(self.receive_address)
+
+        self.receive_qr = QLabel()
+        self.receive_qr.setAlignment(Qt.AlignCenter)
+        self.receive_qr.setMinimumHeight(280)
+        card.layout().addWidget(self.receive_qr)
+
+        self.receive_copy = QPushButton("Copy public address")
+        self.receive_copy.setObjectName("primary")
+        self.receive_copy.clicked.connect(self.copy_receive_address)
+        card.layout().addWidget(self.receive_copy)
+        self.receive_feedback = label("", 12, muted=True)
+        card.layout().addWidget(self.receive_feedback)
+        layout.addWidget(card)
+        layout.addWidget(label(
+            "QR contains the public address only (no WIF). "
+            "Explorer balances may lag behind the blockchain. Test wallets only.",
+            12, muted=True))
         layout.addStretch()
+        self.update_receive()
         return w
+
+    def update_receive(self):
+        address = self.wallet_address
+        self.receive_address.setText(address or "")
+        self.receive_copy.setEnabled(bool(address))
+        self.receive_feedback.setText("")
+        if not address:
+            self.receive_qr.clear()
+            self.receive_qr.setText("Unlock a test wallet to display its QR code.")
+            return
+        # Plain address, rather than an unsupported payment URI scheme.
+        qr = qrcode.QRCode(error_correction=qrcode.constants.ERROR_CORRECT_M,
+                           box_size=8, border=4)
+        qr.add_data(address)
+        qr.make(fit=True)
+        buffer = BytesIO()
+        qr.make_image(fill_color="black", back_color="white").save(buffer, format="PNG")
+        pixmap = QPixmap()
+        if pixmap.loadFromData(buffer.getvalue(), "PNG"):
+            self.receive_qr.setPixmap(pixmap.scaled(
+                280, 280, Qt.KeepAspectRatio, Qt.SmoothTransformation))
+        else:
+            self.receive_qr.setText("QR unavailable. Copy the address above.")
+
+    def copy_receive_address(self):
+        if not self.wallet_address:
+            return
+        QApplication.clipboard().setText(self.wallet_address)
+        self.receive_feedback.setText("Public address copied to clipboard.")
 
     def make_settings(self):
         w = QWidget()
@@ -346,7 +397,7 @@ class WalletWindow(QMainWindow):
     def activate_wallet(self, path, address):
         self.wallet_address = address
         self.wallet_status.setText("Unlocked test wallet: " + address)
-        self.receive_address.setText(address)
+        self.update_receive()
         self.address_input.setText(address)
         self.show_page("Dashboard")
         self.load_address()
@@ -419,7 +470,7 @@ class WalletWindow(QMainWindow):
     def lock_wallet(self):
         self.wallet_address = None
         self.wallet_status.setText("Wallet locked")
-        self.receive_address.clear()
+        self.update_receive()
         self.address_input.clear()
         self.balance_label.setText("— FLOOF")
         self.received_label.setText("—")
