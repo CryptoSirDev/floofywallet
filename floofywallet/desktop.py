@@ -857,7 +857,7 @@ class WalletWindow(QMainWindow):
                 f"Explorer reports {len(utxos)} UTXO(s) across all reported pages. "
                 "Spendability NOT verified.")
             self.coin_preview.setText(
-                "Explorer pagination complete within safety limits; 
+                "Explorer pagination complete within safety limits; "
                 "enter an amount and click Preview. Spendability NOT verified.")
         if not history:
             self.activity.setText("No confirmed transactions in the first page.")
