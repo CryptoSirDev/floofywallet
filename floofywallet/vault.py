@@ -7,6 +7,7 @@ import os
 from pathlib import Path
 import secrets
 
+from cryptography.exceptions import InvalidTag
 from cryptography.hazmat.primitives.ciphers.aead import AESGCM
 from cryptography.hazmat.primitives.kdf.scrypt import Scrypt
 
@@ -72,7 +73,7 @@ def decrypt_wif(vault, password):
         if address_from_wif(wif) != vault["address"]:
             raise ValueError("Address mismatch")
         return wif
-    except (KeyError, TypeError, ValueError, UnicodeError) as exc:
+    except (KeyError, TypeError, ValueError, UnicodeError, InvalidTag) as exc:
         raise VaultError("Wrong password or damaged vault") from exc
 
 
