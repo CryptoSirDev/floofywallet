@@ -119,6 +119,50 @@ class ExplorerClientTests(unittest.TestCase):
             with self.assertRaises(ExplorerError):
                 ExplorerClient().get_address_utxo_snapshot(ADDRESS)
 
+    def test_all_utxos_two_pages(self):
+        txid = "a" * 64
+        pages = [
+            {"address": ADDRESS, "page": 0, "has_more": True, "utxos": [
+                {"txid": txid, "vout": 0, "height": 10, "amount": "1.00000000"}]},
+            {"address": ADDRESS, "page": 1, "has_more": False, "utxos": [
+                {"txid": txid, "vout": 1, "height": 10, "amount": "2.00000000"}]},
+        ]
+        client = ExplorerClient()
+        with patch.object(client, "_get_address_endpoint", side_effect=pages) as mocked:
+            result = client.get_all_address_utxos(ADDRESS)
+        self.assertEqual(len(result), 2)
+        self.assertEqual(mocked.call_args_list[1].args[1], "/utxos?page=1")
+
+    def test_all_utxos_rejects_duplicate_across_pages(self):
+        item = {"txid": "a" * 64, "vout": 0, "height": 10, "amount": "1.00000000"}
+        pages = [
+            {"address": ADDRESS, "page": 0, "has_more": True, "utxos": [item]},
+            {"address": ADDRESS, "page": 1, "has_more": False, "utxos": [item]},
+        ]
+        client = ExplorerClient()
+        with patch.object(client, "_get_address_endpoint", side_effect=pages):
+            with self.assertRaises(ExplorerError):
+                client.get_all_address_utxos(ADDRESS)
+
+    def test_all_utxos_rejects_repeated_page(self):
+        pages = [
+            {"address": ADDRESS, "page": 0, "has_more": True, "utxos": [
+                {"txid": "a" * 64, "vout": 0, "height": 10, "amount": "1.00000000"}]},
+            {"address": ADDRESS, "page": 0, "has_more": False, "utxos": []},
+        ]
+        client = ExplorerClient()
+        with patch.object(client, "_get_address_endpoint", side_effect=pages):
+            with self.assertRaises(ExplorerError):
+                client.get_all_address_utxos(ADDRESS)
+
+    def test_all_utxos_rejects_page_limit(self):
+        page = {"address": ADDRESS, "page": 0, "has_more": True, "utxos": [
+            {"txid": "a" * 64, "vout": 0, "height": 10, "amount": "1.00000000"}]}
+        client = ExplorerClient()
+        with patch.object(client, "_get_address_endpoint", return_value=page):
+            with self.assertRaises(ExplorerError):
+                client.get_all_address_utxos(ADDRESS, max_pages=1)
+
     def test_reject_http(self):
         with self.assertRaises(ValueError):
             ExplorerClient("http://explorer.floofychain.com")
