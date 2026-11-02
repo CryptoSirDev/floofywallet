@@ -189,6 +189,10 @@ class ExplorerClient:
         """
         data = self._get_address_endpoint(address, "/utxos")
         utxos = parse_address_utxos(data, address)
+        if data["page"] != 0:
+            raise ExplorerError("Explorer returned unexpected UTXO page")
+        if data["has_more"] and not utxos:
+            raise ExplorerError("Explorer reports more UTXO pages but returned an empty page")
         return utxos, data["has_more"]
 
     def get_address_utxos(self, address):
