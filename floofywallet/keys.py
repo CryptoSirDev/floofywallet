@@ -60,7 +60,7 @@ def address_from_private(private_key: bytes, *, compressed: bool = True) -> str:
 
 def encode_wif(private_key: bytes, *, compressed: bool = True) -> str:
     _check_private_key(private_key)
-    payload = bytes([MAINNET.wif_prefix]) + private_key + (b"\\x01" if compressed else b"")
+    payload = bytes([MAINNET.wif_prefix]) + private_key + (bytes([1]) if compressed else b"")
     return encode(payload)
 
 

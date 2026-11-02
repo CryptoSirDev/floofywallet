@@ -45,7 +45,7 @@ class TestLegacyKeyVectors(unittest.TestCase):
         self.assertEqual(decode_wif(uncompressed), (KEY_ONE, False))
 
     def test_reject_invalid_private_keys(self):
-        for invalid in (b"", b"\\x00" * 32, SECP256K1_ORDER.to_bytes(32, "big")):
+        for invalid in (b"", bytes([0]) * 32, SECP256K1_ORDER.to_bytes(32, "big")):
             with self.subTest(key_length=len(invalid)):
                 with self.assertRaises(ValueError):
                     public_key_from_private(invalid)
@@ -53,11 +53,11 @@ class TestLegacyKeyVectors(unittest.TestCase):
     def test_reject_other_network_wif(self):
         from floofywallet.base58check import encode
         with self.assertRaises(ValueError):
-            decode_wif(encode(bytes([128]) + KEY_ONE + b"\\x01"))
+            decode_wif(encode(bytes([128]) + KEY_ONE + bytes([1])))
 
     def test_reject_bad_public_key(self):
         with self.assertRaises(ValueError):
-            address_from_public_key(b"\\x02" + b"\\x00" * 32)
+            address_from_public_key(bytes([2]) + bytes([0]) * 32)
 
 
 if __name__ == "__main__":
