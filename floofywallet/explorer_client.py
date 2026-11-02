@@ -40,7 +40,7 @@ def parse_address_summary(data, requested_address):
             value = Decimal(raw)
         except InvalidOperation as exc:
             raise ExplorerError(f"Invalid {field} amount") from exc
-        if not value.is_finite() or value < 0 or value.as_tuple().exponent < -8:
+        if not value.is_finite() or (value < 0 and not allow_negative) or value.as_tuple().exponent < -8:
             raise ExplorerError(f"Invalid {field} amount")
         amounts.append(value)
     txcount = data.get("txcount")
@@ -53,14 +53,14 @@ def parse_address_summary(data, requested_address):
 
 
 
-def _amount(raw):
+def _amount(raw, *, allow_negative=False):
     if not isinstance(raw, str):
         raise ExplorerError("Amount must be a decimal string")
     try:
         value = Decimal(raw)
     except InvalidOperation as exc:
         raise ExplorerError("Invalid decimal amount") from exc
-    if not value.is_finite() or value < 0 or value.as_tuple().exponent < -8:
+    if not value.is_finite() or (value < 0 and not allow_negative) or value.as_tuple().exponent < -8:
         raise ExplorerError("Invalid decimal amount")
     return value
 
@@ -111,7 +111,7 @@ def parse_address_transactions(data, address):
             _txid(item.get("txid")),
             _nonnegative_int(item.get("blockindex"), "blockindex"),
             _nonnegative_int(item.get("time"), "time"),
-            _amount(item.get("amount")),
+            _amount(item.get("amount"), allow_negative=True),
             _amount(item.get("received")),
             _amount(item.get("sent")),
         ))
