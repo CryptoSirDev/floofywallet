@@ -12,7 +12,7 @@ from PyQt5.QtGui import QPixmap
 from PyQt5.QtWidgets import (
     QApplication, QFrame, QHBoxLayout, QLabel, QLineEdit, QMainWindow,
     QMessageBox, QPushButton, QScrollArea, QStackedWidget, QVBoxLayout, QWidget,
-    QDialog, QDialogButtonBox, QFileDialog, QFormLayout,
+    QDialog, QDialogButtonBox, QFileDialog, QFormLayout, QCheckBox,
 )
 
 from .addresses import validate_address
@@ -118,6 +118,8 @@ class WalletWindow(QMainWindow):
 
         self.pages = QStackedWidget()
         outer.addWidget(self.pages, 1)
+        self.welcome = self.make_welcome()
+        self.pages.addWidget(self.welcome)
         self.dashboard = self.make_dashboard()
         self.pages.addWidget(self.dashboard)
         self.receive = self.make_receive()
@@ -128,7 +130,7 @@ class WalletWindow(QMainWindow):
         self.pages.addWidget(self.history_page)
         self.settings = self.make_settings()
         self.pages.addWidget(self.settings)
-        self.show_page("Dashboard")
+        self.show_page("Welcome")
 
     def image_label(self, filename, width, height):
         w = QLabel()
@@ -206,6 +208,24 @@ class WalletWindow(QMainWindow):
         col.addStretch()
         scroll.setWidget(content)
         return scroll
+
+    def make_welcome(self):
+        w = QWidget()
+        layout = QVBoxLayout(w)
+        layout.setContentsMargins(48, 40, 48, 40)
+        layout.setSpacing(16)
+        layout.addWidget(self.image_label("logo.png", 210, 180), alignment=Qt.AlignHCenter)
+        layout.addWidget(label("Welcome to FloofyWallet", 30, True), alignment=Qt.AlignHCenter)
+        layout.addWidget(label("Experimental test wallets only. No real funds.", 14, muted=True))
+        for title, action in (("Create test wallet", self.create_wallet),
+                              ("Import test WIF", self.import_wallet),
+                              ("Unlock encrypted wallet", self.open_wallet)):
+            button = QPushButton(title)
+            button.setObjectName("primary")
+            button.clicked.connect(action)
+            layout.addWidget(button)
+        layout.addStretch()
+        return w
 
     def make_receive(self):
         w = QWidget()
@@ -362,7 +382,8 @@ class WalletWindow(QMainWindow):
         self.txcount_label.setText("—")
         self.activity.setText("No address loaded yet.")
         self.utxo_count.setText("UTXOs: —")
-        self.status.setText("Wallet locked. Public address lookup remains available.")
+        self.status.setText("Wallet locked.")
+        self.show_page("Welcome")
 
     def make_simple_page(self, title, description):
         w = QWidget()
@@ -374,7 +395,11 @@ class WalletWindow(QMainWindow):
         return w
 
     def show_page(self, name):
-        index = ("Dashboard", "Receive", "Send", "History", "Settings").index(name)
+        if self.wallet_address is None and name != "Welcome":
+            name = "Welcome"
+        index = ("Welcome", "Dashboard", "Receive", "Send", "History", "Settings").index(name)
+        for button in self.nav.values():
+            button.setVisible(self.wallet_address is not None)
         self.pages.setCurrentIndex(index)
         for key, button in self.nav.items():
             button.setObjectName("selected" if key == name else "")
