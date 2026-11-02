@@ -21,6 +21,7 @@ import qrcode
 
 from .addresses import validate_address
 from .explorer_client import ExplorerClient, ExplorerError
+from .coin_selection import preview_selection
 from .vault import VaultError, generate_wallet, encrypt_wif, decrypt_wif, load_vault, save_vault, address_from_wif
 
 ASSETS = Path(__file__).resolve().parent / "assets"
@@ -93,6 +94,7 @@ class WalletWindow(QMainWindow):
         self.thread = None
         self.worker = None
         self.wallet_address = None
+        self.reported_utxos = None
         self.history_mode = 'wallet'
         self.requested_address = None
         self.requested_mode = None
@@ -363,6 +365,10 @@ class WalletWindow(QMainWindow):
         self.send_preview = panel()
         self.send_preview.layout().addWidget(label("No transaction preview yet.", 13, muted=True))
         layout.addWidget(self.send_preview)
+        self.coin_preview = label(
+            "Automatic coin-selection preview: waiting for explorer UTXOs. "
+            "Not a spendability check.", 12, muted=True)
+        layout.addWidget(self.coin_preview)
         fees = panel()
         fees.layout().addWidget(label("Transaction Fee — TEST PREVIEW", 16, True))
         fees.layout().addWidget(label(
@@ -420,7 +426,7 @@ class WalletWindow(QMainWindow):
                 rounding=ROUND_CEILING)
             fee = atomic / Decimal(100000000)
             self.fee_result.setText(
-                f"Estimated size: {estimated_bytes} bytes ({inputs} input(s), {outputs} output(s))\\n"
+                f"Estimated size: {estimated_bytes} bytes ({inputs} input(s), {outputs} output(s))\n"
                 f"Reference rate: {rate:.8f} FLOOF/kB  |  "
                 f"Illustrative fee: {fee:.8f} FLOOF")
         except (InvalidOperation, ValueError):
@@ -441,6 +447,29 @@ class WalletWindow(QMainWindow):
         if not amount.is_finite() or amount <= 0 or amount != amount.quantize(unit):
             self.send_feedback.setText("Amount must be positive with at most 8 decimal places.")
             return
+        # Exploratory calculation ONLY from the first explorer UTXO page.
+        # It is not a verified balance, complete pagination, or a spendable quote.
+        if self.wallet_address is None:
+            self.coin_preview.setText("Automatic coin selection unavailable: wallet locked.")
+        elif self.reported_utxos is None:
+            self.coin_preview.setText("Automatic coin selection unavailable: UTXOs not loaded.")
+        else:
+            try:
+                rate = (Decimal(self.custom_fee_rate.text().strip()) if self.fee_custom.isChecked()
+                        else Decimal("0.01000000"))
+                if not rate.is_finite() or rate < Decimal("0.01000000") or rate > Decimal("100"):
+                    raise ValueError("Invalid reference fee rate")
+                selection = preview_selection(self.reported_utxos, amount, rate)
+                self.coin_preview.setText(
+                    f"UNVERIFIED first-page simulation: {len(selection.selected)} input(s), "
+                    f"{selection.output_count} output(s), {selection.estimated_bytes} estimated bytes; "
+                    f"fee {selection.estimated_fee:.8f} FLOOF; "
+                    f"change {selection.change:.8f} FLOOF. "
+                    "Not proof of spendability or complete UTXO pagination.")
+            except (ValueError, InvalidOperation) as exc:
+                self.coin_preview.setText(
+                    "Automatic first-page simulation unavailable: " + str(exc) +
+                    ". No spendable balance established.")
         self.send_feedback.setText(
             "Fee calculation pending verified UTXOs, transaction size and network fee rate. "
             "This preview cannot be sent.")
@@ -701,6 +730,7 @@ class WalletWindow(QMainWindow):
 
     def lock_wallet(self):
         self.wallet_address = None
+        self.reported_utxos = None
         self.history_address.setText("No wallet unlocked")
         self.clear_history()
         self.history_note.setText("Wallet locked; history cleared.")
@@ -720,6 +750,7 @@ class WalletWindow(QMainWindow):
         self.send_fee.setText("Unavailable — UTXOs and fee rate not verified")
         self.send_feedback.setText("Wallet locked. Transaction preview only.")
         self.send_utxo_status.setText("UTXO data: not loaded or verified")
+        self.coin_preview.setText("Automatic coin-selection preview: wallet locked.")
         self.show_page("Welcome")
 
     def make_simple_page(self, title, description):
@@ -786,7 +817,9 @@ class WalletWindow(QMainWindow):
         self.received_label.setText(f"{summary.received:.8f}")
         self.txcount_label.setText(str(summary.txcount))
         self.utxo_count.setText(f"Unspent outputs: {len(utxos)} (spendability not verified)")
+        self.reported_utxos = tuple(utxos)
         self.send_utxo_status.setText(f"Explorer reports {len(utxos)} UTXO(s) on its first page — not verified for spending")
+        self.coin_preview.setText("Automatic coin-selection preview: explorer data loaded; enter an amount and click Preview transaction.")
         if not history:
             self.activity.setText("No confirmed transactions in the first page.")
         else:
@@ -803,7 +836,9 @@ class WalletWindow(QMainWindow):
                 self.history_note.setText("Could not load explorer history: " + error)
         elif self.requested_address == self.wallet_address:
             self.status.setText("Could not load wallet data: " + error)
+            self.reported_utxos = None
             self.send_utxo_status.setText("UTXO data unavailable — fee cannot be estimated")
+            self.coin_preview.setText("Automatic coin-selection preview: explorer data unavailable.")
             if self.history_mode == "wallet":
                 self.history_note.setText("Could not load explorer history: " + error)
 
