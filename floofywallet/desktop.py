@@ -403,13 +403,14 @@ class WalletWindow(QMainWindow):
 
     def update_fee_preview(self, *_):
         custom = self.fee_custom.isChecked()
+        self.custom_fee_rate.setVisible(custom)
         self.custom_fee_rate.setEnabled(custom)
         try:
             rate = Decimal(self.custom_fee_rate.text().strip()) if custom else Decimal("0.01000000")
             if not rate.is_finite() or rate < Decimal("0.01000000") or rate > Decimal("100"):
                 raise ValueError("Fee rate must be between 0.01000000 and 100 FLOOF/kB")
             self.fee_result.setText(
-                f"Selected reference rate: {rate:.8f} FLOOF/kB\\n"
+                f"Selected reference rate: {rate:.8f} FLOOF/kB\n"
                 "Transaction fee: unavailable until verified UTXOs and transaction size are known.")
         except (InvalidOperation, ValueError):
             self.fee_result.setText("Enter a valid custom rate of at least 0.01000000 FLOOF/kB.")
