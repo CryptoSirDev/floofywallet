@@ -227,6 +227,33 @@ class WalletWindow(QMainWindow):
         layout.addStretch()
         return w
 
+    def recovery_dialog(self, wif, address):
+        dialog = QDialog(self)
+        dialog.setWindowTitle("TEST recovery key — shown once")
+        dialog.resize(660, 300)
+        layout = QVBoxLayout(dialog)
+        layout.addWidget(label("Save this test WIF offline. Anyone with it controls the wallet.", 13, True))
+        field = QLineEdit(wif)
+        field.setReadOnly(True)
+        field.setEchoMode(QLineEdit.Password)
+        layout.addWidget(field)
+        show = QCheckBox("Show recovery WIF")
+        show.toggled.connect(lambda visible: field.setEchoMode(QLineEdit.Normal if visible else QLineEdit.Password))
+        layout.addWidget(show)
+        copy = QPushButton("Copy WIF (clipboard is not secure)")
+        copy.clicked.connect(lambda: QApplication.clipboard().setText(wif))
+        layout.addWidget(copy)
+        layout.addWidget(label("Public address: " + address, 12))
+        confirmed = QCheckBox("I have saved my TEST recovery WIF.")
+        layout.addWidget(confirmed)
+        proceed = QPushButton("Continue to wallet")
+        proceed.setObjectName("primary")
+        proceed.setEnabled(False)
+        confirmed.toggled.connect(proceed.setEnabled)
+        proceed.clicked.connect(dialog.accept)
+        layout.addWidget(proceed)
+        return dialog.exec_() == QDialog.Accepted
+
     def make_receive(self):
         w = QWidget()
         layout = QVBoxLayout(w)
@@ -300,8 +327,7 @@ class WalletWindow(QMainWindow):
             return False
         vault = encrypt_wif(wif, password)
         save_vault(path, vault)
-        self.activate_wallet(path, vault["address"])
-        return True
+        return path
 
     def activate_wallet(self, path, address):
         self.wallet_address = address
@@ -322,10 +348,12 @@ class WalletWindow(QMainWindow):
             return
         try:
             wif, address = generate_wallet()
-            if self.save_test_wallet(wif, password):
-                QMessageBox.warning(self, "TEST recovery key — shown once",
-                    "Record this TEST WIF offline. Anyone with it controls the wallet.\n\n"
-                    + wif + "\n\nPublic address: " + address)
+            path = self.save_test_wallet(wif, password)
+            if path:
+                if self.recovery_dialog(wif, address):
+                    self.activate_wallet(path, address)
+                else:
+                    self.show_page("Welcome")
         except (OSError, ValueError, VaultError) as exc:
             QMessageBox.warning(self, "Wallet error", str(exc))
 
@@ -352,7 +380,9 @@ class WalletWindow(QMainWindow):
         if password is None:
             return
         try:
-            self.save_test_wallet(wif, password)
+            path = self.save_test_wallet(wif, password)
+            if path:
+                self.activate_wallet(path, address_from_wif(wif))
         except (OSError, ValueError, VaultError) as exc:
             QMessageBox.warning(self, "Wallet error", str(exc))
 
