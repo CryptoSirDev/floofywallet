@@ -65,7 +65,7 @@ def panel():
 
 
 class AddressWorker(QObject):
-    finished = pyqtSignal(object, object, object)
+    finished = pyqtSignal(object, object, object, bool)
     failed = pyqtSignal(str)
 
     def __init__(self, address):
@@ -77,8 +77,8 @@ class AddressWorker(QObject):
             client = ExplorerClient()
             summary = client.get_address(self.address)
             history = client.get_address_transactions(self.address)
-            utxos = client.get_address_utxos(self.address)
-            self.finished.emit(summary, history, utxos)
+            utxos, has_more = client.get_address_utxo_snapshot(self.address)
+            self.finished.emit(summary, history, utxos, has_more)
         except (ExplorerError, ValueError, OSError) as exc:
             self.failed.emit(str(exc))
         except Exception:
@@ -95,6 +95,7 @@ class WalletWindow(QMainWindow):
         self.worker = None
         self.wallet_address = None
         self.reported_utxos = None
+        self.utxo_page_complete = False
         self.history_mode = 'wallet'
         self.requested_address = None
         self.requested_mode = None
@@ -453,6 +454,8 @@ class WalletWindow(QMainWindow):
             self.coin_preview.setText("Automatic coin selection unavailable: wallet locked.")
         elif self.reported_utxos is None:
             self.coin_preview.setText("Automatic coin selection unavailable: UTXOs not loaded.")
+        elif not self.utxo_page_complete:
+            self.coin_preview.setText("Automatic coin selection unavailable: UTXO listing has more pages.")
         else:
             try:
                 rate = (Decimal(self.custom_fee_rate.text().strip()) if self.fee_custom.isChecked()
@@ -731,6 +734,7 @@ class WalletWindow(QMainWindow):
     def lock_wallet(self):
         self.wallet_address = None
         self.reported_utxos = None
+        self.utxo_page_complete = False
         self.history_address.setText("No wallet unlocked")
         self.clear_history()
         self.history_note.setText("Wallet locked; history cleared.")
@@ -802,7 +806,7 @@ class WalletWindow(QMainWindow):
         self.worker = None
 
 
-    def loaded(self, summary, history, utxos):
+    def loaded(self, summary, history, utxos, has_more):
         requested = self.requested_address
         mode = self.requested_mode
         if mode == "public":
@@ -818,8 +822,19 @@ class WalletWindow(QMainWindow):
         self.txcount_label.setText(str(summary.txcount))
         self.utxo_count.setText(f"Unspent outputs: {len(utxos)} (spendability not verified)")
         self.reported_utxos = tuple(utxos)
-        self.send_utxo_status.setText(f"Explorer reports {len(utxos)} UTXO(s) on its first page — not verified for spending")
-        self.coin_preview.setText("Automatic coin-selection preview: explorer data loaded; enter an amount and click Preview transaction.")
+        self.utxo_page_complete = not has_more
+        if has_more:
+            self.send_utxo_status.setText(
+                f"Explorer reports {len(utxos)} UTXO(s) on first page; more pages exist.")
+            self.coin_preview.setText(
+                "Automatic selection unavailable: explorer UTXO pagination is incomplete.")
+        else:
+            self.send_utxo_status.setText(
+                f"Explorer reports {len(utxos)} UTXO(s); no more pages reported. "
+                "Spendability NOT verified.")
+            self.coin_preview.setText(
+                "First-page explorer listing reports no further pages; "
+                "enter an amount and click Preview. Spendability NOT verified.")
         if not history:
             self.activity.setText("No confirmed transactions in the first page.")
         else:
@@ -837,6 +852,7 @@ class WalletWindow(QMainWindow):
         elif self.requested_address == self.wallet_address:
             self.status.setText("Could not load wallet data: " + error)
             self.reported_utxos = None
+            self.utxo_page_complete = False
             self.send_utxo_status.setText("UTXO data unavailable — fee cannot be estimated")
             self.coin_preview.setText("Automatic coin-selection preview: explorer data unavailable.")
             if self.history_mode == "wallet":
