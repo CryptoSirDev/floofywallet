@@ -1,7 +1,7 @@
 """FloofyWallet desktop preview: read-only address explorer.
 
 Run: python -m floofywallet.desktop
-No key storage or transaction signing is enabled in this preview.
+Encrypted experimental test vault available; signing disabled.
 """
 import sys
 from pathlib import Path
@@ -12,10 +12,12 @@ from PyQt5.QtGui import QPixmap
 from PyQt5.QtWidgets import (
     QApplication, QFrame, QHBoxLayout, QLabel, QLineEdit, QMainWindow,
     QMessageBox, QPushButton, QScrollArea, QStackedWidget, QVBoxLayout, QWidget,
+    QDialog, QDialogButtonBox, QFileDialog, QFormLayout,
 )
 
 from .addresses import validate_address
 from .explorer_client import ExplorerClient, ExplorerError
+from .vault import VaultError, generate_wallet, encrypt_wif, decrypt_wif, load_vault, save_vault, address_from_wif
 
 ASSETS = Path(__file__).resolve().parent / "assets"
 BLUE = "#0879DF"
@@ -86,6 +88,7 @@ class WalletWindow(QMainWindow):
         self.setMinimumSize(900, 600)
         self.thread = None
         self.worker = None
+        self.wallet_address = None
         root = QWidget()
         root.setObjectName("root")
         self.setCentralWidget(root)
@@ -123,7 +126,7 @@ class WalletWindow(QMainWindow):
         self.pages.addWidget(self.send)
         self.history_page = self.make_simple_page("Transaction history", "Load an address in Dashboard to see its confirmed history.")
         self.pages.addWidget(self.history_page)
-        self.settings = self.make_simple_page("Settings", "Experimental preview • Explorer data is third-party and may be stale.")
+        self.settings = self.make_settings()
         self.pages.addWidget(self.settings)
         self.show_page("Dashboard")
 
@@ -205,10 +208,161 @@ class WalletWindow(QMainWindow):
         return scroll
 
     def make_receive(self):
-        return self.make_simple_page(
-            "Receive FLOOF",
-            "Wallet creation and encrypted key storage are not implemented yet. "
-            "For now, use Dashboard to inspect an existing public address.")
+        w = QWidget()
+        layout = QVBoxLayout(w)
+        layout.setContentsMargins(36, 36, 36, 36)
+        layout.addWidget(label("Receive FLOOF", 26, True))
+        layout.addWidget(label("Experimental test wallets only. Never use real funds.", 13, muted=True))
+        self.receive_address = QLineEdit()
+        self.receive_address.setReadOnly(True)
+        self.receive_address.setPlaceholderText("Create or unlock a test wallet in Settings")
+        layout.addWidget(self.receive_address)
+        copy = QPushButton("Copy public address")
+        copy.clicked.connect(lambda: QApplication.clipboard().setText(self.wallet_address or ""))
+        layout.addWidget(copy)
+        layout.addStretch()
+        return w
+
+    def make_settings(self):
+        w = QWidget()
+        layout = QVBoxLayout(w)
+        layout.setContentsMargins(36, 36, 36, 36)
+        layout.setSpacing(14)
+        layout.addWidget(label("Encrypted test wallet", 26, True))
+        layout.addWidget(label("Experimental and unaudited. Never import real keys or send funds.", 13, muted=True))
+        self.wallet_status = label("No wallet opened", 14, True)
+        layout.addWidget(self.wallet_status)
+        for title, callback in (
+            ("Create test wallet", self.create_wallet),
+            ("Import test WIF", self.import_wallet),
+            ("Unlock encrypted wallet", self.open_wallet),
+            ("Lock wallet", self.lock_wallet),
+        ):
+            button = QPushButton(title)
+            button.clicked.connect(callback)
+            layout.addWidget(button)
+        layout.addStretch()
+        return w
+
+    def password_dialog(self, title, confirm=False):
+        dialog = QDialog(self)
+        dialog.setWindowTitle(title)
+        form = QFormLayout(dialog)
+        password = QLineEdit()
+        password.setEchoMode(QLineEdit.Password)
+        form.addRow("Password (12+ characters):", password)
+        repeated = None
+        if confirm:
+            repeated = QLineEdit()
+            repeated.setEchoMode(QLineEdit.Password)
+            form.addRow("Confirm password:", repeated)
+        buttons = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
+        form.addRow(buttons)
+        buttons.accepted.connect(dialog.accept)
+        buttons.rejected.connect(dialog.reject)
+        if dialog.exec_() != QDialog.Accepted:
+            return None
+        value = password.text()
+        if len(value) < 12 or (repeated is not None and repeated.text() != value):
+            QMessageBox.warning(self, "Password error", "Use 12+ characters and matching passwords.")
+            return None
+        return value
+
+    def save_test_wallet(self, wif, password):
+        filename, _ = QFileDialog.getSaveFileName(self, "Save encrypted test wallet", "", "Floofy vault (*.floofvault)")
+        if not filename:
+            return False
+        path = Path(filename)
+        if path.suffix.lower() != ".floofvault":
+            path = path.with_suffix(".floofvault")
+        if path.exists():
+            QMessageBox.warning(self, "File exists", "Choose another filename. Existing vaults are never overwritten.")
+            return False
+        vault = encrypt_wif(wif, password)
+        save_vault(path, vault)
+        self.activate_wallet(path, vault["address"])
+        return True
+
+    def activate_wallet(self, path, address):
+        self.wallet_address = address
+        self.wallet_status.setText("Unlocked test wallet: " + address)
+        self.receive_address.setText(address)
+        self.address_input.setText(address)
+        self.show_page("Dashboard")
+        self.load_address()
+
+    def create_wallet(self):
+        if QMessageBox.warning(self, "Test wallets only",
+                "Create a disposable test wallet? Do not deposit real funds. "
+                "You must record the recovery WIF offline.",
+                QMessageBox.Ok | QMessageBox.Cancel) != QMessageBox.Ok:
+            return
+        password = self.password_dialog("Create test wallet", confirm=True)
+        if password is None:
+            return
+        try:
+            wif, address = generate_wallet()
+            if self.save_test_wallet(wif, password):
+                QMessageBox.warning(self, "TEST recovery key — shown once",
+                    "Record this TEST WIF offline. Anyone with it controls the wallet.\n\n"
+                    + wif + "\n\nPublic address: " + address)
+        except (OSError, ValueError, VaultError) as exc:
+            QMessageBox.warning(self, "Wallet error", str(exc))
+
+    def import_wallet(self):
+        dialog = QDialog(self)
+        dialog.setWindowTitle("Import disposable TEST WIF")
+        form = QFormLayout(dialog)
+        field = QLineEdit()
+        field.setEchoMode(QLineEdit.Password)
+        form.addRow("Test WIF:", field)
+        buttons = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
+        form.addRow(buttons)
+        buttons.accepted.connect(dialog.accept)
+        buttons.rejected.connect(dialog.reject)
+        if dialog.exec_() != QDialog.Accepted:
+            return
+        wif = field.text().strip()
+        try:
+            address_from_wif(wif)
+        except ValueError:
+            QMessageBox.warning(self, "Invalid WIF", "Invalid FloofyChain mainnet WIF.")
+            return
+        password = self.password_dialog("Encrypt imported test WIF", confirm=True)
+        if password is None:
+            return
+        try:
+            self.save_test_wallet(wif, password)
+        except (OSError, ValueError, VaultError) as exc:
+            QMessageBox.warning(self, "Wallet error", str(exc))
+
+    def open_wallet(self):
+        filename, _ = QFileDialog.getOpenFileName(self, "Open encrypted test wallet", "", "Floofy vault (*.floofvault)")
+        if not filename:
+            return
+        password = self.password_dialog("Unlock test wallet")
+        if password is None:
+            return
+        try:
+            vault = load_vault(filename)
+            wif = decrypt_wif(vault, password)
+            address = address_from_wif(wif)
+            del wif
+            self.activate_wallet(filename, address)
+        except (OSError, ValueError, VaultError) as exc:
+            QMessageBox.warning(self, "Cannot unlock", str(exc))
+
+    def lock_wallet(self):
+        self.wallet_address = None
+        self.wallet_status.setText("Wallet locked")
+        self.receive_address.clear()
+        self.address_input.clear()
+        self.balance_label.setText("— FLOOF")
+        self.received_label.setText("—")
+        self.txcount_label.setText("—")
+        self.activity.setText("No address loaded yet.")
+        self.utxo_count.setText("UTXOs: —")
+        self.status.setText("Wallet locked. Public address lookup remains available.")
 
     def make_simple_page(self, title, description):
         w = QWidget()
