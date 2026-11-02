@@ -52,6 +52,99 @@ def parse_address_summary(data, requested_address):
     return AddressSummary(requested_address, *amounts, txcount, source)
 
 
+
+def _amount(raw):
+    if not isinstance(raw, str):
+        raise ExplorerError("Amount must be a decimal string")
+    try:
+        value = Decimal(raw)
+    except InvalidOperation as exc:
+        raise ExplorerError("Invalid decimal amount") from exc
+    if not value.is_finite() or value < 0 or value.as_tuple().exponent < -8:
+        raise ExplorerError("Invalid decimal amount")
+    return value
+
+
+def _nonnegative_int(value, field):
+    if type(value) is not int or value < 0:
+        raise ExplorerError(f"Invalid {field}")
+    return value
+
+
+def _txid(value):
+    if not isinstance(value, str) or len(value) != 64 or any(c not in "0123456789abcdefABCDEF" for c in value):
+        raise ExplorerError("Invalid transaction ID")
+    return value
+
+
+@dataclass(frozen=True)
+class AddressTransaction:
+    txid: str
+    block_height: int
+    timestamp: int
+    amount: Decimal
+    received: Decimal
+    sent: Decimal
+
+
+@dataclass(frozen=True)
+class AddressUtxo:
+    txid: str
+    vout: int
+    height: int
+    amount: Decimal
+
+
+def parse_address_transactions(data, address):
+    if not isinstance(data, dict) or data.get("address") != address:
+        raise ExplorerError("Mismatched address in transaction history")
+    _nonnegative_int(data.get("page"), "page")
+    _nonnegative_int(data.get("limit"), "limit")
+    items = data.get("transactions")
+    if not isinstance(items, list) or len(items) > 10000:
+        raise ExplorerError("Invalid transactions list")
+    result = []
+    for item in items:
+        if not isinstance(item, dict):
+            raise ExplorerError("Invalid transaction")
+        result.append(AddressTransaction(
+            _txid(item.get("txid")),
+            _nonnegative_int(item.get("blockindex"), "blockindex"),
+            _nonnegative_int(item.get("time"), "time"),
+            _amount(item.get("amount")),
+            _amount(item.get("received")),
+            _amount(item.get("sent")),
+        ))
+    return result
+
+
+def parse_address_utxos(data, address):
+    if not isinstance(data, dict) or data.get("address") != address:
+        raise ExplorerError("Mismatched address in UTXO response")
+    _nonnegative_int(data.get("page"), "page")
+    if type(data.get("has_more")) is not bool:
+        raise ExplorerError("Invalid pagination flag")
+    items = data.get("utxos")
+    if not isinstance(items, list) or len(items) > 10000:
+        raise ExplorerError("Invalid UTXO list")
+    result = []
+    seen = set()
+    for item in items:
+        if not isinstance(item, dict):
+            raise ExplorerError("Invalid UTXO")
+        utxo = AddressUtxo(
+            _txid(item.get("txid")),
+            _nonnegative_int(item.get("vout"), "vout"),
+            _nonnegative_int(item.get("height"), "height"),
+            _amount(item.get("amount")),
+        )
+        if (utxo.txid, utxo.vout) in seen:
+            raise ExplorerError("Duplicate UTXO")
+        seen.add((utxo.txid, utxo.vout))
+        result.append(utxo)
+    return result
+
+
 class ExplorerClient:
     def __init__(self, base_url=DEFAULT_BASE_URL, timeout=10):
         if not isinstance(base_url, str) or not base_url.startswith("https://"):
@@ -86,9 +179,9 @@ class ExplorerClient:
         return parse_address_summary(self._get_address_endpoint(address), address)
 
     def get_address_transactions(self, address):
-        """Return untrusted JSON; schema validation awaits a real sample."""
-        return self._get_address_endpoint(address, "/txs")
+        """Read and validate a page of address transactions."""
+        return parse_address_transactions(self._get_address_endpoint(address, "/txs"), address)
 
     def get_address_utxos(self, address):
-        """Return untrusted JSON; never use directly for signing/spending."""
-        return self._get_address_endpoint(address, "/utxos")
+        """Read and validate UTXOs; spendability is NOT established."""
+        return parse_address_utxos(self._get_address_endpoint(address, "/utxos"), address)
