@@ -77,7 +77,8 @@ class AddressWorker(QObject):
             client = ExplorerClient()
             summary = client.get_address(self.address)
             history = client.get_address_transactions(self.address)
-            utxos, has_more = client.get_address_utxo_snapshot(self.address)
+            utxos = client.get_all_address_utxos(self.address)
+            has_more = False
             self.finished.emit(summary, history, utxos, has_more)
         except (ExplorerError, ValueError, OSError) as exc:
             self.failed.emit(str(exc))
@@ -471,8 +472,8 @@ class WalletWindow(QMainWindow):
             return
         self.destination_error.setText("")
         self.amount_error.setText("")
-        # Exploratory calculation ONLY from the first explorer UTXO page.
-        # It is not a verified balance, complete pagination, or a spendable quote.
+        # Exploratory calculation from a bounded complete explorer pagination snapshot.
+        # It is not a verified balance or a spendable quote.
         if self.wallet_address is None:
             self.coin_preview.setText("Automatic coin selection unavailable: wallet locked.")
         elif self.reported_utxos is None:
@@ -487,14 +488,14 @@ class WalletWindow(QMainWindow):
                     raise ValueError("Invalid reference fee rate")
                 selection = preview_selection(self.reported_utxos, amount, rate)
                 self.coin_preview.setText(
-                    f"UNVERIFIED first-page simulation: {len(selection.selected)} input(s), "
+                    f"UNVERIFIED explorer simulation: {len(selection.selected)} input(s), 
                     f"{selection.output_count} output(s), {selection.estimated_bytes} estimated bytes; "
                     f"fee {selection.estimated_fee:.8f} FLOOF; "
                     f"change {selection.change:.8f} FLOOF. "
-                    "Not proof of spendability or complete UTXO pagination.")
+                    "Complete reported pagination is NOT proof of spendability.")
             except (ValueError, InvalidOperation) as exc:
                 self.coin_preview.setText(
-                    "Automatic first-page simulation unavailable: " + str(exc) +
+                    "Automatic explorer simulation unavailable: " + str(exc) +
                     ". No spendable balance established.")
         self.send_feedback.setText(
             "Fee calculation pending verified UTXOs, transaction size and network fee rate. "
@@ -843,7 +844,7 @@ class WalletWindow(QMainWindow):
         self.balance_label.setText(f"{summary.balance:.8f} FLOOF")
         self.received_label.setText(f"{summary.received:.8f}")
         self.txcount_label.setText(str(summary.txcount))
-        self.utxo_count.setText(f"Unspent outputs: {len(utxos)} (spendability not verified)")
+        self.utxo_count.setText(f"Explorer UTXOs across reported pages: {len(utxos)} (spendability not verified)")
         self.reported_utxos = tuple(utxos)
         self.utxo_page_complete = not has_more
         if has_more:
@@ -853,10 +854,10 @@ class WalletWindow(QMainWindow):
                 "Automatic selection unavailable: explorer UTXO pagination is incomplete.")
         else:
             self.send_utxo_status.setText(
-                f"Explorer reports {len(utxos)} UTXO(s); no more pages reported. "
+                f"Explorer reports {len(utxos)} UTXO(s) across all reported pages. "
                 "Spendability NOT verified.")
             self.coin_preview.setText(
-                "First-page explorer listing reports no further pages; "
+                "Explorer pagination complete within safety limits; 
                 "enter an amount and click Preview. Spendability NOT verified.")
         if not history:
             self.activity.setText("No confirmed transactions in the first page.")
