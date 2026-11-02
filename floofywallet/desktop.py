@@ -343,12 +343,13 @@ class WalletWindow(QMainWindow):
         card.layout().addWidget(self.send_amount)
         card.layout().addWidget(label("Estimated network fee (FLOOF)", 15, True))
         self.send_fee = QLineEdit()
-        self.send_fee.setPlaceholderText("Enter an illustrative fee, e.g. 0.001")
+        self.send_fee.setReadOnly(True)
+        self.send_fee.setText("Unavailable — UTXOs and fee rate not verified")
         card.layout().addWidget(self.send_fee)
         layout.addWidget(card)
         self.send_feedback = label(
-            "Fee is illustrative, not calculated from transaction size or UTXOs. "
-            "Available balance and spendability are not verified.", 12, muted=True)
+            "Network fee will be calculated automatically once verified UTXOs "
+            "and fee estimation are implemented. No manual fee entry.", 12, muted=True)
         layout.addWidget(self.send_feedback)
         preview = QPushButton("Preview transaction")
         preview.setObjectName("primary")
@@ -363,29 +364,21 @@ class WalletWindow(QMainWindow):
     def preview_send(self):
         address = self.send_destination.text().strip()
         amount_text = self.send_amount.text().strip()
-        fee_text = self.send_fee.text().strip()
         if not validate_address(address):
             self.send_feedback.setText("Invalid FloofyChain destination address.")
             return
         try:
             amount = Decimal(amount_text)
-            fee = Decimal(fee_text)
         except InvalidOperation:
-            self.send_feedback.setText("Amount and fee must be valid decimal numbers.")
+            self.send_feedback.setText("Amount must be a valid decimal number.")
             return
         unit = Decimal("0.00000001")
-        if (not amount.is_finite() or not fee.is_finite() or amount <= 0
-                or fee < 0 or amount != amount.quantize(unit)
-                or fee != fee.quantize(unit)):
-            self.send_feedback.setText(
-                "Amount must be positive; fee cannot be negative; maximum 8 decimal places.")
-            return
-        total = amount + fee
-        if total != total.quantize(unit):
-            self.send_feedback.setText("Invalid total precision.")
+        if not amount.is_finite() or amount <= 0 or amount != amount.quantize(unit):
+            self.send_feedback.setText("Amount must be positive with at most 8 decimal places.")
             return
         self.send_feedback.setText(
-            "Preview only: no coins selected, no balance check, no transaction signed.")
+            "Fee calculation pending verified UTXOs, transaction size and network fee rate. "
+            "This preview cannot be sent.")
         box = self.send_preview.layout()
         while box.count():
             item = box.takeAt(0)
@@ -395,8 +388,8 @@ class WalletWindow(QMainWindow):
         box.addWidget(label("From: " + (self.wallet_address or "Locked"), 12))
         box.addWidget(label("To: " + address, 12))
         box.addWidget(label(f"Amount: {amount:.8f} FLOOF", 13))
-        box.addWidget(label(f"Illustrative fee: {fee:.8f} FLOOF", 13))
-        box.addWidget(label(f"Illustrative total: {total:.8f} FLOOF", 16, True))
+        box.addWidget(label("Estimated network fee: unavailable", 13))
+        box.addWidget(label("Total including fee: pending estimation", 15, True))
         disabled = QPushButton("Confirm send — unavailable in preview")
         disabled.setEnabled(False)
         box.addWidget(disabled)
@@ -659,7 +652,7 @@ class WalletWindow(QMainWindow):
         self.status.setText("Wallet locked.")
         self.send_destination.clear()
         self.send_amount.clear()
-        self.send_fee.clear()
+        self.send_fee.setText("Unavailable — UTXOs and fee rate not verified")
         self.send_feedback.setText("Wallet locked. Transaction preview only.")
         self.show_page("Welcome")
 
