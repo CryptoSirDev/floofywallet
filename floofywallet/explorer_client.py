@@ -182,6 +182,15 @@ class ExplorerClient:
         """Read and validate a page of address transactions."""
         return parse_address_transactions(self._get_address_endpoint(address, "/txs"), address)
 
+    def get_address_utxo_snapshot(self, address):
+        """Return validated first-page UTXOs and explicit pagination status.
+
+        A complete explorer response is still NOT proof of spendability.
+        """
+        data = self._get_address_endpoint(address, "/utxos")
+        utxos = parse_address_utxos(data, address)
+        return utxos, data["has_more"]
+
     def get_address_utxos(self, address):
-        """Read and validate UTXOs; spendability is NOT established."""
-        return parse_address_utxos(self._get_address_endpoint(address, "/utxos"), address)
+        """Legacy first-page API; spendability is NOT established."""
+        return self.get_address_utxo_snapshot(address)[0]
