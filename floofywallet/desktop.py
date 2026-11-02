@@ -7,6 +7,7 @@ import sys
 from io import BytesIO
 from pathlib import Path
 from datetime import datetime, timezone
+from decimal import Decimal, InvalidOperation
 
 from PyQt5.QtCore import QObject, QThread, Qt, pyqtSignal
 from PyQt5.QtGui import QPixmap
@@ -130,7 +131,7 @@ class WalletWindow(QMainWindow):
         self.pages.addWidget(self.dashboard)
         self.receive = self.make_receive()
         self.pages.addWidget(self.receive)
-        self.send = self.make_simple_page("Send FLOOF", "Sending is disabled in this read-only preview. No private keys are stored.")
+        self.send = self.make_send()
         self.pages.addWidget(self.send)
         self.history_page = self.make_history()
         self.pages.addWidget(self.history_page)
@@ -321,6 +322,84 @@ class WalletWindow(QMainWindow):
             return
         QApplication.clipboard().setText(self.wallet_address)
         self.receive_feedback.setText("Public address copied to clipboard.")
+
+    def make_send(self):
+        w = QWidget()
+        layout = QVBoxLayout(w)
+        layout.setContentsMargins(36, 32, 36, 32)
+        layout.setSpacing(15)
+        layout.addWidget(label("Send FLOOF", 26, True))
+        layout.addWidget(label(
+            "Transaction preview only. Signing and broadcasting are disabled. "
+            "Do not use real funds.", 13, muted=True))
+        card = panel()
+        card.layout().addWidget(label("Destination address", 15, True))
+        self.send_destination = QLineEdit()
+        self.send_destination.setPlaceholderText("FloofyChain mainnet address (F...)")
+        card.layout().addWidget(self.send_destination)
+        card.layout().addWidget(label("Amount (FLOOF)", 15, True))
+        self.send_amount = QLineEdit()
+        self.send_amount.setPlaceholderText("e.g. 10.00000000")
+        card.layout().addWidget(self.send_amount)
+        card.layout().addWidget(label("Estimated network fee (FLOOF)", 15, True))
+        self.send_fee = QLineEdit()
+        self.send_fee.setPlaceholderText("Enter an illustrative fee, e.g. 0.001")
+        card.layout().addWidget(self.send_fee)
+        layout.addWidget(card)
+        self.send_feedback = label(
+            "Fee is illustrative, not calculated from transaction size or UTXOs. "
+            "Available balance and spendability are not verified.", 12, muted=True)
+        layout.addWidget(self.send_feedback)
+        preview = QPushButton("Preview transaction")
+        preview.setObjectName("primary")
+        preview.clicked.connect(self.preview_send)
+        layout.addWidget(preview)
+        self.send_preview = panel()
+        self.send_preview.layout().addWidget(label("No transaction preview yet.", 13, muted=True))
+        layout.addWidget(self.send_preview)
+        layout.addStretch()
+        return w
+
+    def preview_send(self):
+        address = self.send_destination.text().strip()
+        amount_text = self.send_amount.text().strip()
+        fee_text = self.send_fee.text().strip()
+        if not validate_address(address):
+            self.send_feedback.setText("Invalid FloofyChain destination address.")
+            return
+        try:
+            amount = Decimal(amount_text)
+            fee = Decimal(fee_text)
+        except InvalidOperation:
+            self.send_feedback.setText("Amount and fee must be valid decimal numbers.")
+            return
+        unit = Decimal("0.00000001")
+        if (not amount.is_finite() or not fee.is_finite() or amount <= 0
+                or fee < 0 or amount != amount.quantize(unit)
+                or fee != fee.quantize(unit)):
+            self.send_feedback.setText(
+                "Amount must be positive; fee cannot be negative; maximum 8 decimal places.")
+            return
+        total = amount + fee
+        if total != total.quantize(unit):
+            self.send_feedback.setText("Invalid total precision.")
+            return
+        self.send_feedback.setText(
+            "Preview only: no coins selected, no balance check, no transaction signed.")
+        box = self.send_preview.layout()
+        while box.count():
+            item = box.takeAt(0)
+            if item.widget():
+                item.widget().deleteLater()
+        box.addWidget(label("Transaction preview — NOT BROADCAST", 16, True))
+        box.addWidget(label("From: " + (self.wallet_address or "Locked"), 12))
+        box.addWidget(label("To: " + address, 12))
+        box.addWidget(label(f"Amount: {amount:.8f} FLOOF", 13))
+        box.addWidget(label(f"Illustrative fee: {fee:.8f} FLOOF", 13))
+        box.addWidget(label(f"Illustrative total: {total:.8f} FLOOF", 16, True))
+        disabled = QPushButton("Confirm send — unavailable in preview")
+        disabled.setEnabled(False)
+        box.addWidget(disabled)
 
     def make_history(self):
         w = QWidget()
@@ -578,6 +657,10 @@ class WalletWindow(QMainWindow):
         self.activity.setText("No address loaded yet.")
         self.utxo_count.setText("UTXOs: —")
         self.status.setText("Wallet locked.")
+        self.send_destination.clear()
+        self.send_amount.clear()
+        self.send_fee.clear()
+        self.send_feedback.setText("Wallet locked. Transaction preview only.")
         self.show_page("Welcome")
 
     def make_simple_page(self, title, description):
