@@ -61,12 +61,13 @@ class ExplorerClient:
         self.base_url = base_url.rstrip("/")
         self.timeout = timeout
 
-    def get_address(self, address):
+    def _get_address_endpoint(self, address, suffix=""):
+
         # Validate the address before using it in a URL.
         from .addresses import validate_address
         if not validate_address(address):
             raise ValueError("Invalid FloofyChain address")
-        path = "/api/v1/address/" + quote(address, safe="")
+        path = "/api/v1/address/" + quote(address, safe="") + suffix
         req = Request(self.base_url + path, headers={"Accept": "application/json", "User-Agent": "FloofyWallet/0.1"})
         try:
             with urlopen(req, timeout=self.timeout) as response:
@@ -79,4 +80,15 @@ class ExplorerClient:
             data = json.loads(body)
         except (ValueError, UnicodeError) as exc:
             raise ExplorerError("Explorer returned invalid JSON") from exc
-        return parse_address_summary(data, address)
+        return data
+
+    def get_address(self, address):
+        return parse_address_summary(self._get_address_endpoint(address), address)
+
+    def get_address_transactions(self, address):
+        """Return untrusted JSON; schema validation awaits a real sample."""
+        return self._get_address_endpoint(address, "/txs")
+
+    def get_address_utxos(self, address):
+        """Return untrusted JSON; never use directly for signing/spending."""
+        return self._get_address_endpoint(address, "/utxos")
