@@ -488,7 +488,7 @@ class WalletWindow(QMainWindow):
                     raise ValueError("Invalid reference fee rate")
                 selection = preview_selection(self.reported_utxos, amount, rate)
                 self.coin_preview.setText(
-                    f"UNVERIFIED explorer simulation: {len(selection.selected)} input(s), 
+                    f"UNVERIFIED explorer simulation: {len(selection.selected)} input(s), "
                     f"{selection.output_count} output(s), {selection.estimated_bytes} estimated bytes; "
                     f"fee {selection.estimated_fee:.8f} FLOOF; "
                     f"change {selection.change:.8f} FLOOF. "
