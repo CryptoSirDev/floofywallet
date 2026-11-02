@@ -82,6 +82,43 @@ class ExplorerClientTests(unittest.TestCase):
                                  "utxos": [{"txid": "bad", "vout": 0, "height": 1,
                                             "amount": "10.00000000"}]}, address)
 
+    def test_utxo_snapshot_pagination_status(self):
+        import json
+        class Response:
+            def __enter__(self):
+                return BytesIO(json.dumps(self.payload).encode())
+            def __exit__(self, *args):
+                return False
+        Response.payload = {"address": ADDRESS, "page": 0, "has_more": False, "utxos": []}
+        with patch("floofywallet.explorer_client.urlopen", return_value=Response()):
+            items, has_more = ExplorerClient().get_address_utxo_snapshot(ADDRESS)
+        self.assertEqual(items, [])
+        self.assertFalse(has_more)
+
+    def test_utxo_snapshot_rejects_wrong_page(self):
+        import json
+        class Response:
+            def __enter__(self):
+                return BytesIO(json.dumps(self.payload).encode())
+            def __exit__(self, *args):
+                return False
+        Response.payload = {"address": ADDRESS, "page": 1, "has_more": False, "utxos": []}
+        with patch("floofywallet.explorer_client.urlopen", return_value=Response()):
+            with self.assertRaises(ExplorerError):
+                ExplorerClient().get_address_utxo_snapshot(ADDRESS)
+
+    def test_utxo_snapshot_rejects_empty_nonterminal_page(self):
+        import json
+        class Response:
+            def __enter__(self):
+                return BytesIO(json.dumps(self.payload).encode())
+            def __exit__(self, *args):
+                return False
+        Response.payload = {"address": ADDRESS, "page": 0, "has_more": True, "utxos": []}
+        with patch("floofywallet.explorer_client.urlopen", return_value=Response()):
+            with self.assertRaises(ExplorerError):
+                ExplorerClient().get_address_utxo_snapshot(ADDRESS)
+
     def test_reject_http(self):
         with self.assertRaises(ValueError):
             ExplorerClient("http://explorer.floofychain.com")
