@@ -92,6 +92,9 @@ class WalletWindow(QMainWindow):
         self.thread = None
         self.worker = None
         self.wallet_address = None
+        self.history_mode = 'wallet'
+        self.requested_address = None
+        self.requested_mode = None
         root = QWidget()
         root.setObjectName("root")
         self.setCentralWidget(root)
@@ -167,21 +170,19 @@ class WalletWindow(QMainWindow):
         h.addWidget(self.image_label("logo.png", 205, 150))
         col.addWidget(hero)
 
-        search = panel()
-        search.layout().addWidget(label("Explore a public FLOOF address", 15, True))
-        bar = QHBoxLayout()
-        self.address_input = QLineEdit()
-        self.address_input.setPlaceholderText("Paste a public FloofyChain address (starts with F)")
-        self.address_input.returnPressed.connect(self.load_address)
-        bar.addWidget(self.address_input, 1)
-        self.load_button = QPushButton("Load address")
-        self.load_button.setObjectName("primary")
-        self.load_button.clicked.connect(self.load_address)
-        bar.addWidget(self.load_button)
-        search.layout().addLayout(bar)
-        self.status = label("Read-only preview • No wallet keys are imported.", 11, muted=True)
-        search.layout().addWidget(self.status)
-        col.addWidget(search)
+        wallet_card = panel()
+        wallet_card.layout().addWidget(label("Your wallet address", 15, True))
+        address_row = QHBoxLayout()
+        self.dashboard_address = QLineEdit()
+        self.dashboard_address.setReadOnly(True)
+        address_row.addWidget(self.dashboard_address, 1)
+        copy_address = QPushButton("Copy address")
+        copy_address.clicked.connect(self.copy_receive_address)
+        address_row.addWidget(copy_address)
+        wallet_card.layout().addLayout(address_row)
+        self.status = label("Explorer data may be delayed.", 11, muted=True)
+        wallet_card.layout().addWidget(self.status)
+        col.addWidget(wallet_card)
 
         stats = QHBoxLayout()
         balance = panel()
@@ -328,8 +329,21 @@ class WalletWindow(QMainWindow):
         outer.setSpacing(14)
         outer.addWidget(label("Transaction history", 26, True))
         outer.addWidget(label("Confirmed transactions for your unlocked wallet address. Explorer data may be delayed.", 13, muted=True))
+        modes = QHBoxLayout()
+        self.wallet_history_button = QPushButton("My wallet")
+        self.public_history_button = QPushButton("Explore address")
+        self.wallet_history_button.clicked.connect(lambda: self.switch_history_mode("wallet"))
+        self.public_history_button.clicked.connect(lambda: self.switch_history_mode("public"))
+        modes.addWidget(self.wallet_history_button)
+        modes.addWidget(self.public_history_button)
+        outer.addLayout(modes)
         self.history_address = label("No wallet unlocked", 13, True)
         outer.addWidget(self.history_address)
+        self.public_address_input = QLineEdit()
+        self.public_address_input.setPlaceholderText("Paste a public FloofyChain address")
+        self.public_address_input.returnPressed.connect(self.refresh_wallet_history)
+        outer.addWidget(self.public_address_input)
+        self.public_address_input.hide()
         refresh = QPushButton("Refresh history")
         refresh.setObjectName("primary")
         refresh.clicked.connect(self.refresh_wallet_history)
@@ -355,12 +369,26 @@ class WalletWindow(QMainWindow):
                 item.widget().deleteLater()
         self.history_layout.addStretch()
 
+    def switch_history_mode(self, mode):
+        self.history_mode = mode
+        self.public_address_input.setVisible(mode == "public")
+        self.history_address.setVisible(mode == "wallet")
+        for button, active in ((self.wallet_history_button, mode == "wallet"),
+                               (self.public_history_button, mode == "public")):
+            button.setObjectName("selected" if active else "")
+            button.style().unpolish(button)
+            button.style().polish(button)
+        self.clear_history()
+        self.history_note.setText("Enter an address and refresh." if mode == "public"
+                                  else "Click Refresh history to load your transactions.")
+
     def refresh_wallet_history(self):
-        if self.wallet_address is None:
+        address = self.wallet_address if self.history_mode == "wallet" else self.public_address_input.text().strip()
+        if not address or not validate_address(address):
+            self.history_note.setText("Enter a valid FloofyChain address.")
             return
-        self.address_input.setText(self.wallet_address)
         self.history_note.setText("Loading confirmed transactions…")
-        self.load_address()
+        self.load_address(address, self.history_mode)
 
     def populate_history(self, transactions, txcount):
         self.clear_history()
@@ -460,13 +488,14 @@ class WalletWindow(QMainWindow):
     def activate_wallet(self, path, address):
         self.wallet_address = address
         self.history_address.setText("Wallet: " + address)
+        self.dashboard_address.setText(address)
+        self.switch_history_mode("wallet")
         self.clear_history()
         self.history_note.setText("Loading confirmed transactions…")
         self.wallet_status.setText("Unlocked test wallet: " + address)
         self.update_receive()
-        self.address_input.setText(address)
         self.show_page("Dashboard")
-        self.load_address()
+        self.load_address(address, "wallet")
 
     def create_wallet(self):
         if QMessageBox.warning(self, "Test wallets only",
@@ -540,7 +569,9 @@ class WalletWindow(QMainWindow):
         self.history_note.setText("Wallet locked; history cleared.")
         self.wallet_status.setText("Wallet locked")
         self.update_receive()
-        self.address_input.clear()
+        self.dashboard_address.clear()
+        self.public_address_input.clear()
+        self.switch_history_mode("wallet")
         self.balance_label.setText("— FLOOF")
         self.received_label.setText("—")
         self.txcount_label.setText("—")
@@ -570,15 +601,16 @@ class WalletWindow(QMainWindow):
             button.style().unpolish(button)
             button.style().polish(button)
 
-    def load_address(self):
-        address = self.address_input.text().strip()
+    def load_address(self, address, mode="wallet"):
+        address = address.strip()
         if not validate_address(address):
             QMessageBox.warning(self, "Invalid address", "Enter a valid FloofyChain mainnet address.")
             return
         if self.thread is not None:
             return
         self.status.setText("Loading explorer data…")
-        self.load_button.setEnabled(False)
+        self.requested_address = address
+        self.requested_mode = mode
         self.thread = QThread()
         self.worker = AddressWorker(address)
         self.worker.moveToThread(self.thread)
@@ -595,15 +627,19 @@ class WalletWindow(QMainWindow):
     def cleanup_worker(self):
         self.thread = None
         self.worker = None
-        self.load_button.setEnabled(True)
+
 
     def loaded(self, summary, history, utxos):
-        # Only show history when the response belongs to the currently unlocked wallet.
-        requested = self.worker.address if self.worker is not None else None
-        if requested == self.wallet_address and self.wallet_address is not None:
+        requested = self.requested_address
+        mode = self.requested_mode
+        if mode == "public":
+            if self.history_mode == "public" and requested == self.public_address_input.text().strip():
+                self.populate_history(history, summary.txcount)
+            return
+        if requested != self.wallet_address or self.wallet_address is None:
+            return
+        if self.history_mode == "wallet":
             self.populate_history(history, summary.txcount)
-        elif self.wallet_address is not None:
-            self.history_note.setText("Dashboard address differs from your wallet. Click Refresh history.")
         self.balance_label.setText(f"{summary.balance:.8f} FLOOF")
         self.received_label.setText(f"{summary.received:.8f}")
         self.txcount_label.setText(str(summary.txcount))
@@ -612,15 +648,20 @@ class WalletWindow(QMainWindow):
             self.activity.setText("No confirmed transactions in the first page.")
         else:
             lines = []
-            for tx in history[:8]:
+            for tx in history[:5]:
                 when = datetime.fromtimestamp(tx.timestamp, tz=timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
                 lines.append(f"{when}    {tx.txid[:12]}…    {tx.amount:.8f} FLOOF")
             self.activity.setText("\n\n".join(lines))
         self.status.setText(f"Explorer: {summary.source} • Read-only • Data may be stale")
 
     def load_failed(self, error):
-        self.status.setText("Could not load address: " + error)
-        self.history_note.setText("Could not load explorer history: " + error)
+        if self.requested_mode == "public":
+            if self.history_mode == "public":
+                self.history_note.setText("Could not load explorer history: " + error)
+        elif self.requested_address == self.wallet_address:
+            self.status.setText("Could not load wallet data: " + error)
+            if self.history_mode == "wallet":
+                self.history_note.setText("Could not load explorer history: " + error)
 
 
 def main():
