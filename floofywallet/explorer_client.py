@@ -40,7 +40,7 @@ def parse_address_summary(data, requested_address):
             value = Decimal(raw)
         except InvalidOperation as exc:
             raise ExplorerError(f"Invalid {field} amount") from exc
-        if not value.is_finite() or (value < 0 and not allow_negative) or value.as_tuple().exponent < -8:
+        if not value.is_finite() or value < 0 or value.as_tuple().exponent < -8:
             raise ExplorerError(f"Invalid {field} amount")
         amounts.append(value)
     txcount = data.get("txcount")
