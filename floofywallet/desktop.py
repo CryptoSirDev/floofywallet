@@ -93,9 +93,10 @@ class CoreCheckWorker(QObject):
     finished = pyqtSignal(str)
     verified = pyqtSignal(object)
 
-    def __init__(self, url, username, password, utxo):
+    def __init__(self, url, username, password, address, utxo):
         super().__init__()
-        self.url, self.username, self.password, self.utxo = url, username, password, utxo
+        self.url, self.username, self.password = url, username, password
+        self.address, self.utxo = address, utxo
 
     def run(self):
         try:
@@ -103,15 +104,15 @@ class CoreCheckWorker(QObject):
             info = reader.blockchain_info()
             if info.get("chain") != "main" or info.get("initialblockdownload") is not False:
                 raise CoreReadError("Core is not ready on FloofyChain mainnet")
-            result = reader.check_outpoint(
-                self.utxo.txid, self.utxo.vout, self.utxo.amount)
+            result = reader.verify_address_outpoint(
+                self.utxo.txid, self.utxo.vout, self.address, self.utxo.amount)
             if result is None:
                 message = "Core reports this outpoint missing or spent. NOT verified."
             else:
                 message = (
                     f"Core confirms unspent outpoint: {result['amount']:.8f} FLOOF, "
                     f"{result['confirmations']} confirmation(s). "
-                    "Script ownership and wallet spendability NOT verified.")
+                    "Locking script matches this address; private-key control and spendability NOT verified.")
             if result is not None:
                 self.verified.emit((self.utxo.txid, self.utxo.vout, self.utxo.amount))
             self.finished.emit(message)
@@ -596,7 +597,7 @@ class WalletWindow(QMainWindow):
         self.core_check_button.setEnabled(False)
         self.core_check_status.setText("Checking first explorer UTXO with local Core...")
         self.core_thread = QThread(self)
-        self.core_worker = CoreCheckWorker(url, username, password, self.reported_utxos[0])
+        self.core_worker = CoreCheckWorker(url, username, password, self.wallet_address, self.reported_utxos[0])
         self.core_worker.moveToThread(self.core_thread)
         self.core_thread.started.connect(self.core_worker.run)
         self.core_worker.verified.connect(self.record_core_verification)
