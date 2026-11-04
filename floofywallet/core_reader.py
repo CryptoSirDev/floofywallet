@@ -9,6 +9,8 @@ from decimal import Decimal, InvalidOperation
 from urllib.error import HTTPError, URLError
 from urllib.request import Request, urlopen
 from urllib.parse import urlsplit
+from .base58check import decode as decode_base58check
+from .network_params import MAINNET
 
 class CoreReadError(Exception):
     pass
@@ -38,6 +40,33 @@ def parse_gettxout(data, expected_amount=None):
         raise CoreReadError("Missing output script")
     return {"amount": amount, "confirmations": confirmations,
             "coinbase": data.get("coinbase") is True, "script_hex": script["hex"]}
+
+def verify_p2pkh_outpoint(data, expected_address, expected_amount=None, *, min_confirmations=1):
+    """Verify Core's UTXO script locks to the requested mainnet P2PKH address.
+
+    This checks the Core-reported outpoint, not possession of a private key.
+    It does not establish that the explorer's full UTXO list is complete.
+    """
+    if type(min_confirmations) is not int or min_confirmations < 1:
+        raise ValueError("Minimum confirmations must be a positive integer")
+    try:
+        payload = decode_base58check(expected_address)
+    except (ValueError, TypeError) as exc:
+        raise CoreReadError("Invalid expected address") from exc
+    if len(payload) != 21 or payload[0] != MAINNET.p2pkh_prefix:
+        raise CoreReadError("Expected a mainnet P2PKH address")
+    result = parse_gettxout(data, expected_amount)
+    if result is None:
+        raise CoreReadError("Outpoint is spent, absent, or unavailable in Core")
+    if result["confirmations"] < min_confirmations:
+        raise CoreReadError("Outpoint has insufficient confirmations")
+    if result["coinbase"] and result["confirmations"] < 100:
+        raise CoreReadError("Coinbase output is not mature")
+    expected_script = "76a914" + payload[1:].hex() + "88ac"
+    if result["script_hex"].lower() != expected_script:
+        raise CoreReadError("Output script does not match the wallet address")
+    return result
+
 
 class LocalCoreReader:
     def __init__(self, url, username, password, timeout=5):
