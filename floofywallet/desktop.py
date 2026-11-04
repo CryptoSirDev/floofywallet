@@ -6,6 +6,7 @@ Encrypted experimental test vault available; signing disabled.
 import sys
 from io import BytesIO
 from pathlib import Path
+from types import SimpleNamespace
 from datetime import datetime, timezone
 from decimal import Decimal, InvalidOperation, ROUND_CEILING
 
@@ -364,6 +365,16 @@ class WalletWindow(QMainWindow):
         self.send_utxo_status = label("UTXO data: not loaded or verified", 12, muted=True)
         card.layout().addWidget(self.send_utxo_status)
         layout.addWidget(card)
+        demo_card = panel()
+        demo_card.layout().addWidget(label("Offline demonstration — fictional FLOOF", 15, True))
+        self.demo_mode = QCheckBox("Use fictional UTXOs for this preview only")
+        self.demo_mode.setChecked(False)
+        self.demo_mode.toggled.connect(self.on_send_fields_changed)
+        demo_card.layout().addWidget(self.demo_mode)
+        demo_card.layout().addWidget(label(
+            "Demo inputs: 6 + 6 + 20 FLOOF. No wallet balances are changed. "
+            "Sending remains disabled.", 12, muted=True))
+        layout.addWidget(demo_card)
         self.send_feedback = label(
             "Network fee will be calculated automatically once verified UTXOs "
             "and fee estimation are implemented. No manual fee entry.", 12, muted=True)
@@ -474,11 +485,16 @@ class WalletWindow(QMainWindow):
         self.amount_error.setText("")
         # Exploratory calculation from a bounded complete explorer pagination snapshot.
         # It is not a verified balance or a spendable quote.
+        demo = self.demo_mode.isChecked()
+        available_utxos = (tuple(
+            SimpleNamespace(txid=f"{n:064x}", vout=0, amount=Decimal(value))
+            for n, value in ((1, "6"), (2, "6"), (3, "20"))
+        ) if demo else self.reported_utxos)
         if self.wallet_address is None:
             self.coin_preview.setText("Automatic coin selection unavailable: wallet locked.")
-        elif self.reported_utxos is None:
+        elif not demo and self.reported_utxos is None:
             self.coin_preview.setText("Automatic coin selection unavailable: UTXOs not loaded.")
-        elif not self.utxo_page_complete:
+        elif not demo and not self.utxo_page_complete:
             self.coin_preview.setText("Automatic coin selection unavailable: UTXO listing has more pages.")
         else:
             try:
@@ -486,16 +502,16 @@ class WalletWindow(QMainWindow):
                         else Decimal("0.01000000"))
                 if not rate.is_finite() or rate < Decimal("0.01000000") or rate > Decimal("100"):
                     raise ValueError("Invalid reference fee rate")
-                selection = preview_selection(self.reported_utxos, amount, rate)
+                selection = preview_selection(available_utxos, amount, rate)
                 self.coin_preview.setText(
-                    f"UNVERIFIED explorer simulation: {len(selection.selected)} input(s), "
+                    f"{'FICTIONAL OFFLINE DEMO' if demo else 'UNVERIFIED explorer simulation'}: {len(selection.selected)} input(s), "
                     f"{selection.output_count} output(s), {selection.estimated_bytes} estimated bytes; "
                     f"fee {selection.estimated_fee:.8f} FLOOF; "
                     f"change {selection.change:.8f} FLOOF. "
-                    "Complete reported pagination is NOT proof of spendability.")
+                    "No proof of spendability. No transaction will be sent.")
             except (ValueError, InvalidOperation) as exc:
                 self.coin_preview.setText(
-                    "Automatic explorer simulation unavailable: " + str(exc) +
+                    ("Fictional demo unavailable: " if demo else "Automatic explorer simulation unavailable: ") + str(exc) +
                     ". No spendable balance established.")
         self.send_feedback.setText(
             "Fee calculation pending verified UTXOs, transaction size and network fee rate. "
@@ -505,7 +521,7 @@ class WalletWindow(QMainWindow):
             item = box.takeAt(0)
             if item.widget():
                 item.widget().deleteLater()
-        box.addWidget(label("Transaction preview — NOT BROADCAST", 16, True))
+        box.addWidget(label("FICTIONAL DEMO — NOT BROADCAST" if demo else "Transaction preview — NOT BROADCAST", 16, True))
         box.addWidget(label("From: " + (self.wallet_address or "Locked"), 12))
         box.addWidget(label("To: " + address, 12))
         box.addWidget(label(f"Amount: {amount:.8f} FLOOF", 13))
