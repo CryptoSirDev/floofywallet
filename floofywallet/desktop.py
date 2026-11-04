@@ -408,26 +408,6 @@ class WalletWindow(QMainWindow):
             "Demo inputs: 6 + 6 + 20 FLOOF. No wallet balances are changed. "
             "Sending remains disabled.", 12, muted=True))
         layout.addWidget(demo_card)
-        core_card = panel()
-        core_card.layout().addWidget(label("Verify explorer UTXO with Local Core — READ ONLY", 15, True))
-        core_card.layout().addWidget(label(
-            "Checks the first explorer-reported UTXO only. Does not prove ownership or spendability. "
-            "Keep RPC local; credentials are not saved.", 12, muted=True))
-        self.core_url = QLineEdit("http://127.0.0.1:6662")
-        self.core_url.setPlaceholderText("Local RPC URL and port")
-        self.core_user = QLineEdit()
-        self.core_user.setPlaceholderText("RPC username")
-        self.core_password = QLineEdit()
-        self.core_password.setPlaceholderText("RPC password (never saved)")
-        self.core_password.setEchoMode(QLineEdit.Password)
-        for field in (self.core_url, self.core_user, self.core_password):
-            core_card.layout().addWidget(field)
-        self.core_check_button = QPushButton("Verify first explorer UTXO with Local Core")
-        self.core_check_button.clicked.connect(self.verify_local_core)
-        core_card.layout().addWidget(self.core_check_button)
-        self.core_check_status = label("No local Core verification performed.", 13, True)
-        core_card.layout().addWidget(self.core_check_status)
-        layout.addWidget(core_card)
         self.send_feedback = label(
             "Network fee will be calculated automatically once verified UTXOs "
             "and fee estimation are implemented. No manual fee entry.", 12, muted=True)
@@ -730,6 +710,9 @@ class WalletWindow(QMainWindow):
             self.history_layout.insertWidget(self.history_layout.count() - 1, card)
 
     def make_settings(self):
+        scroll = QScrollArea()
+        scroll.setWidgetResizable(True)
+        scroll.setFrameShape(QFrame.NoFrame)
         w = QWidget()
         layout = QVBoxLayout(w)
         layout.setContentsMargins(36, 36, 36, 36)
@@ -746,8 +729,35 @@ class WalletWindow(QMainWindow):
             button = QPushButton(title)
             button.clicked.connect(callback)
             layout.addWidget(button)
+        layout.addWidget(label("Advanced — Developer Tools", 18, True))
+        self.show_core_tools = QCheckBox("Show local Core verification tools (advanced)")
+        self.show_core_tools.setChecked(False)
+        layout.addWidget(self.show_core_tools)
+        core_card = panel()
+        core_card.layout().addWidget(label("Verify explorer UTXO with Local Core — READ ONLY", 15, True))
+        core_card.layout().addWidget(label(
+            "Checks the first explorer-reported UTXO only. Does not prove ownership or spendability. "
+            "Keep RPC local; credentials are not saved.", 12, muted=True))
+        self.core_url = QLineEdit("http://127.0.0.1:6662")
+        self.core_url.setPlaceholderText("Local RPC URL and port")
+        self.core_user = QLineEdit()
+        self.core_user.setPlaceholderText("RPC username")
+        self.core_password = QLineEdit()
+        self.core_password.setPlaceholderText("RPC password (never saved)")
+        self.core_password.setEchoMode(QLineEdit.Password)
+        for field in (self.core_url, self.core_user, self.core_password):
+            core_card.layout().addWidget(field)
+        self.core_check_button = QPushButton("Verify first explorer UTXO with Local Core")
+        self.core_check_button.clicked.connect(self.verify_local_core)
+        core_card.layout().addWidget(self.core_check_button)
+        self.core_check_status = label("No local Core verification performed.", 13, True)
+        core_card.layout().addWidget(self.core_check_status)
+        layout.addWidget(core_card)
+        core_card.setVisible(False)
+        self.show_core_tools.toggled.connect(core_card.setVisible)
         layout.addStretch()
-        return w
+        scroll.setWidget(w)
+        return scroll
 
     def password_dialog(self, title, confirm=False):
         dialog = QDialog(self)
