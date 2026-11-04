@@ -159,6 +159,11 @@ class WalletWindow(QMainWindow):
         mascot = self.image_label("Floofy_Icone.png", 150, 150)
         side.addWidget(mascot, alignment=Qt.AlignHCenter)
         side.addWidget(label("Powered by FloofyChain", 11, muted=True), alignment=Qt.AlignHCenter)
+        credit = QLabel('Made by: <a href="https://github.com/CryptoSirDev" style="color: #0879DF; text-decoration: underline;">CryptoSirDev</a>')
+        credit.setAlignment(Qt.AlignCenter)
+        credit.setOpenExternalLinks(True)
+        credit.setStyleSheet("font: 11px 'Segoe UI'; color: #6283A3;")
+        side.addWidget(credit, alignment=Qt.AlignHCenter)
         outer.addWidget(sidebar)
 
         self.pages = QStackedWidget()
