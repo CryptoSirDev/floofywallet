@@ -300,8 +300,11 @@ class WalletWindow(QMainWindow):
         layout = QVBoxLayout(w)
         layout.setContentsMargins(48, 40, 48, 40)
         layout.setSpacing(16)
-        layout.addWidget(self.image_label("logo.png", 210, 180), alignment=Qt.AlignHCenter)
-        layout.addWidget(label("Welcome to FloofyWallet", 30, True), alignment=Qt.AlignHCenter)
+        layout.addWidget(self.image_label("Floofy_Icon.png", 210, 180, fallback="logo.png"), alignment=Qt.AlignHCenter)
+        welcome_title = label("Welcome to FloofyWallet", 30, True)
+        welcome_title.setWordWrap(False)
+        welcome_title.setAlignment(Qt.AlignCenter)
+        layout.addWidget(welcome_title)
         layout.addWidget(label("Experimental test wallets only. No real funds.", 14, muted=True))
         for title, action in (("Create test wallet", self.create_wallet),
                               ("Import test WIF", self.import_wallet),
