@@ -24,6 +24,7 @@ from .addresses import validate_address
 from .explorer_client import ExplorerClient, ExplorerError
 from .coin_selection import preview_selection
 from .decimal_input import parse_decimal_input
+from .core_reader import LocalCoreReader, CoreReadError
 from .vault import VaultError, generate_wallet, encrypt_wif, decrypt_wif, load_vault, save_vault, address_from_wif
 
 ASSETS = Path(__file__).resolve().parent / "assets"
@@ -88,6 +89,35 @@ class AddressWorker(QObject):
             self.failed.emit("Unexpected explorer response")
 
 
+class CoreCheckWorker(QObject):
+    finished = pyqtSignal(str)
+
+    def __init__(self, url, username, password, utxo):
+        super().__init__()
+        self.url, self.username, self.password, self.utxo = url, username, password, utxo
+
+    def run(self):
+        try:
+            reader = LocalCoreReader(self.url, self.username, self.password)
+            info = reader.blockchain_info()
+            if info.get("chain") != "main" or info.get("initialblockdownload") is not False:
+                raise CoreReadError("Core is not ready on FloofyChain mainnet")
+            result = reader.check_outpoint(
+                self.utxo.txid, self.utxo.vout, self.utxo.amount)
+            if result is None:
+                message = "Core reports this outpoint missing or spent. NOT verified."
+            else:
+                message = (
+                    f"Core confirms unspent outpoint: {result['amount']:.8f} FLOOF, "
+                    f"{result['confirmations']} confirmation(s). "
+                    "Script ownership and wallet spendability NOT verified.")
+            self.finished.emit(message)
+        except (CoreReadError, ValueError, OSError) as exc:
+            self.finished.emit("Core check failed: " + str(exc))
+        except Exception:
+            self.finished.emit("Core check failed unexpectedly")
+
+
 class WalletWindow(QMainWindow):
     def __init__(self):
         super().__init__()
@@ -96,6 +126,8 @@ class WalletWindow(QMainWindow):
         self.setMinimumSize(900, 600)
         self.thread = None
         self.worker = None
+        self.core_thread = None
+        self.core_worker = None
         self.wallet_address = None
         self.reported_utxos = None
         self.utxo_page_complete = False
@@ -376,6 +408,26 @@ class WalletWindow(QMainWindow):
             "Demo inputs: 6 + 6 + 20 FLOOF. No wallet balances are changed. "
             "Sending remains disabled.", 12, muted=True))
         layout.addWidget(demo_card)
+        core_card = panel()
+        core_card.layout().addWidget(label("Verify explorer UTXO with Local Core — READ ONLY", 15, True))
+        core_card.layout().addWidget(label(
+            "Checks the first explorer-reported UTXO only. Does not prove ownership or spendability. "
+            "Keep RPC local; credentials are not saved.", 12, muted=True))
+        self.core_url = QLineEdit("http://127.0.0.1:6662")
+        self.core_url.setPlaceholderText("Local RPC URL and port")
+        self.core_user = QLineEdit()
+        self.core_user.setPlaceholderText("RPC username")
+        self.core_password = QLineEdit()
+        self.core_password.setPlaceholderText("RPC password (never saved)")
+        self.core_password.setEchoMode(QLineEdit.Password)
+        for field in (self.core_url, self.core_user, self.core_password):
+            core_card.layout().addWidget(field)
+        self.core_check_button = QPushButton("Verify first explorer UTXO with Local Core")
+        self.core_check_button.clicked.connect(self.verify_local_core)
+        core_card.layout().addWidget(self.core_check_button)
+        self.core_check_status = label("No local Core verification performed.", 13, True)
+        core_card.layout().addWidget(self.core_check_status)
+        layout.addWidget(core_card)
         self.send_feedback = label(
             "Network fee will be calculated automatically once verified UTXOs "
             "and fee estimation are implemented. No manual fee entry.", 12, muted=True)
@@ -423,6 +475,46 @@ class WalletWindow(QMainWindow):
         layout.addStretch()
         scroll.setWidget(w)
         return scroll
+
+    def verify_local_core(self):
+        if self.core_thread is not None:
+            return
+        if self.demo_mode.isChecked():
+            self.core_check_status.setText("Turn off fictional demo mode before checking real UTXOs.")
+            return
+        if self.wallet_address is None or self.reported_utxos is None or not self.utxo_page_complete:
+            self.core_check_status.setText("Load a complete explorer UTXO list first.")
+            return
+        if not self.reported_utxos:
+            self.core_check_status.setText("Explorer reports no UTXOs for this wallet.")
+            return
+        url = self.core_url.text().strip()
+        username = self.core_user.text().strip()
+        password = self.core_password.text()
+        self.core_password.clear()
+        try:
+            # Reject nonlocal URLs before starting a worker.
+            LocalCoreReader(url, username, password)
+        except ValueError as exc:
+            self.core_check_status.setText(str(exc))
+            return
+        self.core_check_button.setEnabled(False)
+        self.core_check_status.setText("Checking first explorer UTXO with local Core...")
+        self.core_thread = QThread(self)
+        self.core_worker = CoreCheckWorker(url, username, password, self.reported_utxos[0])
+        self.core_worker.moveToThread(self.core_thread)
+        self.core_thread.started.connect(self.core_worker.run)
+        self.core_worker.finished.connect(self.core_check_status.setText)
+        self.core_worker.finished.connect(self.core_thread.quit)
+        self.core_worker.finished.connect(self.core_worker.deleteLater)
+        self.core_thread.finished.connect(self.core_thread.deleteLater)
+        self.core_thread.finished.connect(self.core_check_finished)
+        self.core_thread.start()
+
+    def core_check_finished(self):
+        self.core_thread = None
+        self.core_worker = None
+        self.core_check_button.setEnabled(True)
 
     def update_fee_preview(self, *_):
         custom = self.fee_custom.isChecked()
