@@ -440,7 +440,7 @@ class WalletWindow(QMainWindow):
         self.send_fee.setReadOnly(True)
         self.send_fee.setText("Unavailable — UTXOs and fee rate not verified")
         card.layout().addWidget(self.send_fee)
-        self.send_utxo_status = label("UTXO data: not loaded or verified", 12, muted=True)
+        self.send_utxo_status = label("UTXO status: no data loaded. Explorer data is not proof of spendability.", 12, muted=True)
         card.layout().addWidget(self.send_utxo_status)
         layout.addWidget(card)
         demo_card = panel()
@@ -604,6 +604,20 @@ class WalletWindow(QMainWindow):
         # Exploratory calculation from a bounded complete explorer pagination snapshot.
         # It is not a verified balance or a spendable quote.
         demo = self.demo_mode.isChecked()
+        if demo:
+            self.send_utxo_status.setText(
+                "FICTIONAL DEMO: simulated UTXOs only. No real funds or spendability.")
+        elif self.wallet_address is None:
+            self.send_utxo_status.setText("LOCKED: open a test wallet to load UTXOs.")
+        elif self.reported_utxos is None:
+            self.send_utxo_status.setText("NOT LOADED: no explorer UTXO snapshot available.")
+        elif not self.utxo_page_complete:
+            self.send_utxo_status.setText(
+                "INCOMPLETE: explorer UTXO pages are missing; no reliable selection.")
+        else:
+            self.send_utxo_status.setText(
+                f"EXPLORER ONLY: {len(self.reported_utxos)} reported UTXO(s). "
+                "Unverified; ownership and spendability not established.")
         available_utxos = (tuple(
             SimpleNamespace(txid=f"{n:064x}", vout=0, amount=Decimal(value))
             for n, value in ((1, "6"), (2, "6"), (3, "20"))
