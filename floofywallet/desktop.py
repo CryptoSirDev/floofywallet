@@ -11,7 +11,7 @@ from datetime import datetime, timezone
 from decimal import Decimal, InvalidOperation, ROUND_CEILING
 
 from PyQt5.QtCore import QObject, QThread, Qt, pyqtSignal
-from PyQt5.QtGui import QPixmap
+from PyQt5.QtGui import QPixmap, QRegion
 from PyQt5.QtWidgets import (
     QApplication, QFrame, QHBoxLayout, QLabel, QLineEdit, QMainWindow,
     QMessageBox, QPushButton, QScrollArea, QStackedWidget, QVBoxLayout, QWidget,
@@ -156,7 +156,7 @@ class WalletWindow(QMainWindow):
             side.addWidget(b)
             self.nav[name] = b
         side.addStretch()
-        mascot = self.image_label("Floofy_Icone.png", 150, 150)
+        mascot = self.image_label("Incubator_Icon.png", 150, 150, fallback="Floofy_Icone.png")
         side.addWidget(mascot, alignment=Qt.AlignHCenter)
         side.addWidget(label("Powered by FloofyChain", 11, muted=True), alignment=Qt.AlignHCenter)
         credit = QLabel('Made by: <a href="https://github.com/CryptoSirDev" style="color: #0879DF; text-decoration: underline;">CryptoSirDev</a>')
@@ -182,15 +182,24 @@ class WalletWindow(QMainWindow):
         self.pages.addWidget(self.settings)
         self.show_page("Welcome")
 
-    def image_label(self, filename, width, height):
+    def image_label(self, filename, width, height, fallback=None):
+        """Crop transparent margins before fitting an asset into its display area."""
         w = QLabel()
         w.setAlignment(Qt.AlignCenter)
-        pix = QPixmap(str(ASSETS / filename))
+        w.setFixedSize(width, height)
+        path = ASSETS / filename
+        if not path.is_file() and fallback:
+            path = ASSETS / fallback
+        pix = QPixmap(str(path))
         if pix.isNull():
-            w.setText("🐹" if filename == "logo.png" else "😎")
-            w.setStyleSheet("font-size: 60px;")
-        else:
-            w.setPixmap(pix.scaled(width, height, Qt.KeepAspectRatio, Qt.SmoothTransformation))
+            w.setText("Image unavailable")
+            w.setStyleSheet("font-size: 11px;")
+            return w
+        if pix.hasAlphaChannel():
+            bounds = QRegion(pix.mask()).boundingRect()
+            if bounds.isValid() and not bounds.isEmpty():
+                pix = pix.copy(bounds)
+        w.setPixmap(pix.scaled(width, height, Qt.KeepAspectRatio, Qt.SmoothTransformation))
         return w
 
     def make_dashboard(self):
@@ -211,7 +220,7 @@ class WalletWindow(QMainWindow):
         words.addWidget(label("Your FLOOF, your keys, your future.", 15))
         words.addStretch()
         h.addLayout(words, 1)
-        h.addWidget(self.image_label("logo.png", 205, 150))
+        h.addWidget(self.image_label("Floofy_Icon.png", 205, 150, fallback="logo.png"))
         col.addWidget(hero)
 
         wallet_card = panel()
