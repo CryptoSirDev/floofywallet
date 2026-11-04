@@ -83,6 +83,22 @@ class ScriptVerificationTests(unittest.TestCase):
         with self.assertRaises(CoreReadError):
             verify_p2pkh_outpoint(data, self.address)
 
+    def test_reader_verifies_matching_address(self):
+        from unittest.mock import patch
+        reader = LocalCoreReader("http://127.0.0.1:6662", "user", "secret")
+        with patch.object(reader, "_call", return_value=self.output) as rpc:
+            result = reader.verify_address_outpoint("a" * 64, 0, self.address, Decimal("10"))
+        self.assertEqual(result["confirmations"], 591)
+        rpc.assert_called_once_with("gettxout", ["a" * 64, 0, True])
+
+    def test_reader_rejects_wrong_script(self):
+        from unittest.mock import patch
+        from floofywallet.addresses import encode_p2pkh
+        reader = LocalCoreReader("http://127.0.0.1:6662", "user", "secret")
+        with patch.object(reader, "_call", return_value=self.output):
+            with self.assertRaises(CoreReadError):
+                reader.verify_address_outpoint("a" * 64, 0, encode_p2pkh(bytes(20)), Decimal("10"))
+
     def test_invalid_confirmation_threshold(self):
         with self.assertRaises(ValueError):
             verify_p2pkh_outpoint(self.output, self.address, min_confirmations=0)
