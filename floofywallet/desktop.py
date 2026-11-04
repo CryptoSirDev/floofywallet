@@ -91,6 +91,7 @@ class AddressWorker(QObject):
 
 class CoreCheckWorker(QObject):
     finished = pyqtSignal(str)
+    verified = pyqtSignal(object)
 
     def __init__(self, url, username, password, utxo):
         super().__init__()
@@ -111,6 +112,8 @@ class CoreCheckWorker(QObject):
                     f"Core confirms unspent outpoint: {result['amount']:.8f} FLOOF, "
                     f"{result['confirmations']} confirmation(s). "
                     "Script ownership and wallet spendability NOT verified.")
+            if result is not None:
+                self.verified.emit((self.utxo.txid, self.utxo.vout, self.utxo.amount))
             self.finished.emit(message)
         except (CoreReadError, ValueError, OSError) as exc:
             self.finished.emit("Core check failed: " + str(exc))
@@ -128,6 +131,8 @@ class WalletWindow(QMainWindow):
         self.worker = None
         self.core_thread = None
         self.core_worker = None
+        self.core_verified_outpoint = None
+        self.core_check_address = None
         self.wallet_address = None
         self.reported_utxos = None
         self.utxo_page_complete = False
@@ -523,18 +528,31 @@ class WalletWindow(QMainWindow):
         except ValueError as exc:
             self.core_check_status.setText(str(exc))
             return
+        self.core_verified_outpoint = None
+        self.core_check_address = self.wallet_address
         self.core_check_button.setEnabled(False)
         self.core_check_status.setText("Checking first explorer UTXO with local Core...")
         self.core_thread = QThread(self)
         self.core_worker = CoreCheckWorker(url, username, password, self.reported_utxos[0])
         self.core_worker.moveToThread(self.core_thread)
         self.core_thread.started.connect(self.core_worker.run)
+        self.core_worker.verified.connect(self.record_core_verification)
         self.core_worker.finished.connect(self.core_check_status.setText)
         self.core_worker.finished.connect(self.core_thread.quit)
         self.core_worker.finished.connect(self.core_worker.deleteLater)
         self.core_thread.finished.connect(self.core_thread.deleteLater)
         self.core_thread.finished.connect(self.core_check_finished)
         self.core_thread.start()
+
+    def record_core_verification(self, outpoint):
+        if (self.wallet_address == self.core_check_address
+                and self.reported_utxos is not None
+                and any((u.txid, u.vout, u.amount) == outpoint
+                        for u in self.reported_utxos)):
+            self.core_verified_outpoint = outpoint
+            self.send_utxo_status.setText(
+                "LOCAL CORE: one explorer-reported outpoint confirmed unspent. "
+                "Other UTXOs, ownership and spendability remain unverified.")
 
     def core_check_finished(self):
         self.core_thread = None
@@ -614,6 +632,10 @@ class WalletWindow(QMainWindow):
         elif not self.utxo_page_complete:
             self.send_utxo_status.setText(
                 "INCOMPLETE: explorer UTXO pages are missing; no reliable selection.")
+        elif self.core_verified_outpoint is not None:
+            self.send_utxo_status.setText(
+                "LOCAL CORE: one reported UTXO confirmed unspent. "
+                "Remaining UTXOs and wallet spendability NOT verified.")
         else:
             self.send_utxo_status.setText(
                 f"EXPLORER ONLY: {len(self.reported_utxos)} reported UTXO(s). "
@@ -671,6 +693,9 @@ class WalletWindow(QMainWindow):
         elif demo:
             box.addWidget(label("Fictional simulation unavailable — see details below.", 15, True))
         else:
+            if self.core_verified_outpoint is not None:
+                box.addWidget(label(
+                    "Local Core checked one reported UTXO only; no proof of wallet spendability.", 13, True))
             box.addWidget(label("Estimated network fee: unavailable", 13))
             box.addWidget(label("Total including fee: pending estimation", 15, True))
         disabled = QPushButton("Confirm send — unavailable in preview")
@@ -950,6 +975,7 @@ class WalletWindow(QMainWindow):
     def lock_wallet(self):
         self.wallet_address = None
         self.reported_utxos = None
+        self.core_verified_outpoint = None
         self.utxo_page_complete = False
         self.history_address.setText("No wallet unlocked")
         self.clear_history()
@@ -1038,6 +1064,7 @@ class WalletWindow(QMainWindow):
         self.txcount_label.setText(str(summary.txcount))
         self.utxo_count.setText(f"Explorer UTXOs across reported pages: {len(utxos)} (spendability not verified)")
         self.reported_utxos = tuple(utxos)
+        self.core_verified_outpoint = None
         self.utxo_page_complete = not has_more
         if has_more:
             self.send_utxo_status.setText(
@@ -1068,6 +1095,7 @@ class WalletWindow(QMainWindow):
         elif self.requested_address == self.wallet_address:
             self.status.setText("Could not load wallet data: " + error)
             self.reported_utxos = None
+            self.core_verified_outpoint = None
             self.utxo_page_complete = False
             self.send_utxo_status.setText("UTXO data unavailable — fee cannot be estimated")
             self.coin_preview.setText("Automatic coin-selection preview: explorer data unavailable.")
