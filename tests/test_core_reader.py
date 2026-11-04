@@ -1,7 +1,7 @@
 """Offline tests for read-only local Core RPC validation."""
 import unittest
 from decimal import Decimal
-from floofywallet.core_reader import LocalCoreReader, CoreReadError, parse_gettxout
+from floofywallet.core_reader import LocalCoreReader, CoreReadError, parse_gettxout, verify_p2pkh_outpoint
 
 class CoreReaderTests(unittest.TestCase):
     def test_missing_outpoint(self):
@@ -36,6 +36,57 @@ class CoreReaderTests(unittest.TestCase):
         with self.assertRaises(CoreReadError):
             parse_gettxout({"value": "1.000000001", "confirmations": 1,
                             "scriptPubKey": {"hex": "00"}})
+
+class ScriptVerificationTests(unittest.TestCase):
+    def setUp(self):
+        from floofywallet.addresses import encode_p2pkh
+        self.hash160 = bytes.fromhex("37fa93723619acae2132a0dc14727ab0d6d6b5f2")
+        self.address = encode_p2pkh(self.hash160)
+        self.output = {
+            "value": "10.00000000", "confirmations": 591, "coinbase": False,
+            "scriptPubKey": {"hex": "76a914" + self.hash160.hex() + "88ac"},
+        }
+
+    def test_matching_script(self):
+        result = verify_p2pkh_outpoint(self.output, self.address, Decimal("10"))
+        self.assertEqual(result["confirmations"], 591)
+
+    def test_wrong_address_rejected(self):
+        from floofywallet.addresses import encode_p2pkh
+        with self.assertRaises(CoreReadError):
+            verify_p2pkh_outpoint(self.output, encode_p2pkh(bytes(20)), Decimal("10"))
+
+    def test_mismatched_amount_rejected(self):
+        with self.assertRaises(CoreReadError):
+            verify_p2pkh_outpoint(self.output, self.address, Decimal("11"))
+
+    def test_missing_utxo_rejected(self):
+        with self.assertRaises(CoreReadError):
+            verify_p2pkh_outpoint(None, self.address)
+
+    def test_unconfirmed_rejected(self):
+        data = dict(self.output, confirmations=0)
+        with self.assertRaises(CoreReadError):
+            verify_p2pkh_outpoint(data, self.address)
+
+    def test_immature_coinbase_rejected(self):
+        data = dict(self.output, coinbase=True, confirmations=99)
+        with self.assertRaises(CoreReadError):
+            verify_p2pkh_outpoint(data, self.address)
+
+    def test_mature_coinbase_allowed(self):
+        data = dict(self.output, coinbase=True, confirmations=100)
+        self.assertEqual(verify_p2pkh_outpoint(data, self.address)["confirmations"], 100)
+
+    def test_non_p2pkh_script_rejected(self):
+        data = dict(self.output, scriptPubKey={"hex": "a914" + self.hash160.hex() + "87"})
+        with self.assertRaises(CoreReadError):
+            verify_p2pkh_outpoint(data, self.address)
+
+    def test_invalid_confirmation_threshold(self):
+        with self.assertRaises(ValueError):
+            verify_p2pkh_outpoint(self.output, self.address, min_confirmations=0)
+
 
 if __name__ == "__main__":
     unittest.main()
