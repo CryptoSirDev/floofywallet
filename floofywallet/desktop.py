@@ -1,0 +1,1187 @@
+"""FloofyWallet desktop preview: read-only address explorer.
+
+Run: python -m floofywallet.desktop
+Encrypted experimental test vault available; signing disabled.
+"""
+import sys
+from io import BytesIO
+from pathlib import Path
+from types import SimpleNamespace
+from datetime import datetime, timezone
+from decimal import Decimal, InvalidOperation, ROUND_CEILING
+
+from PyQt5.QtCore import QObject, QThread, Qt, pyqtSignal
+from PyQt5.QtGui import QPixmap, QRegion
+from PyQt5.QtWidgets import (
+    QApplication, QFrame, QHBoxLayout, QLabel, QLineEdit, QMainWindow,
+    QMessageBox, QPushButton, QScrollArea, QStackedWidget, QVBoxLayout, QWidget,
+    QDialog, QDialogButtonBox, QFileDialog, QFormLayout, QCheckBox, QRadioButton, QButtonGroup, QSpinBox,
+)
+
+import qrcode
+
+from .addresses import validate_address
+from .explorer_client import ExplorerClient, ExplorerError
+from .coin_selection import preview_selection
+from .decimal_input import parse_decimal_input
+from .core_reader import LocalCoreReader, CoreReadError
+from .vault import VaultError, generate_wallet, encrypt_wif, decrypt_wif, load_vault, save_vault, address_from_wif
+
+ASSETS = Path(__file__).resolve().parent / "assets"
+BLUE = "#0879DF"
+NAVY = "#09204D"
+STYLE = """
+QMainWindow, QWidget#root { background: #F3FAFF; }
+QFrame#sidebar { background: #FFFFFF; border-right: 1px solid #D9EAF7; }
+QFrame#hero { background: #DDF3FF; border-radius: 22px; }
+QFrame#panel { background: white; border: 1px solid #D8EAF7; border-radius: 18px; }
+QLabel { color: #09204D; font-family: 'Segoe UI'; }
+QLabel#muted { color: #6283A3; }
+QLabel#big { font-size: 33px; font-weight: 800; }
+QLabel#heading { font-size: 23px; font-weight: 800; }
+QPushButton { background: #E8F5FF; border: 0; border-radius: 12px; padding: 12px 16px;
+              color: #09204D; font: 600 12px 'Segoe UI'; text-align: left; }
+QPushButton:hover { background: #D3EDFF; }
+QPushButton#selected { background: #0879DF; color: white; }
+QPushButton#primary { background: #0879DF; color: white; text-align: center; }
+QPushButton:disabled { color: #8B9CAC; background: #E9EEF3; }
+QLineEdit { background: white; color: #09204D; border: 1px solid #B7D7EE;
+            border-radius: 10px; padding: 12px; font: 12px 'Segoe UI'; }
+"""
+
+
+def label(text, size=13, bold=False, muted=False):
+    w = QLabel(text)
+    w.setWordWrap(True)
+    w.setStyleSheet("font-size: %dpx; font-weight: %d; color: %s;" %
+                    (size, 750 if bold else 400, "#6283A3" if muted else NAVY))
+    return w
+
+
+def panel():
+    f = QFrame()
+    f.setObjectName("panel")
+    f.setLayout(QVBoxLayout())
+    f.layout().setContentsMargins(22, 20, 22, 20)
+    f.layout().setSpacing(10)
+    return f
+
+
+class AddressWorker(QObject):
+    finished = pyqtSignal(object, object, object, bool)
+    failed = pyqtSignal(str)
+
+    def __init__(self, address):
+        super().__init__()
+        self.address = address
+
+    def run(self):
+        try:
+            client = ExplorerClient()
+            summary = client.get_address(self.address)
+            history = client.get_address_transactions(self.address)
+            utxos = client.get_all_address_utxos(self.address)
+            has_more = False
+            self.finished.emit(summary, history, utxos, has_more)
+        except (ExplorerError, ValueError, OSError) as exc:
+            self.failed.emit(str(exc))
+        except Exception:
+            self.failed.emit("Unexpected explorer response")
+
+
+class CoreCheckWorker(QObject):
+    finished = pyqtSignal(str)
+    verified = pyqtSignal(object)
+
+    def __init__(self, url, username, password, address, utxo):
+        super().__init__()
+        self.url, self.username, self.password = url, username, password
+        self.address, self.utxo = address, utxo
+
+    def run(self):
+        try:
+            reader = LocalCoreReader(self.url, self.username, self.password)
+            info = reader.blockchain_info()
+            if info.get("chain") != "main" or info.get("initialblockdownload") is not False:
+                raise CoreReadError("Core is not ready on FloofyChain mainnet")
+            result = reader.verify_address_outpoint(
+                self.utxo.txid, self.utxo.vout, self.address, self.utxo.amount)
+            if result is None:
+                message = "Core reports this outpoint missing or spent. NOT verified."
+            else:
+                message = (
+                    f"Core confirms unspent outpoint: {result['amount']:.8f} FLOOF, "
+                    f"{result['confirmations']} confirmation(s). "
+                    "Locking script matches this address; private-key control and spendability NOT verified.")
+            if result is not None:
+                self.verified.emit((self.utxo.txid, self.utxo.vout, self.utxo.amount))
+            self.finished.emit(message)
+        except (CoreReadError, ValueError, OSError) as exc:
+            self.finished.emit("Core check failed: " + str(exc))
+        except Exception:
+            self.finished.emit("Core check failed unexpectedly")
+
+
+class CoreDiagnosticWorker(QObject):
+    finished = pyqtSignal(str)
+
+    def __init__(self, url, username, password):
+        super().__init__()
+        self.url, self.username, self.password = url, username, password
+
+    def run(self):
+        try:
+            info = LocalCoreReader(self.url, self.username, self.password).blockchain_info()
+            chain = info.get("chain")
+            blocks = info.get("blocks")
+            headers = info.get("headers")
+            ibd = info.get("initialblockdownload")
+            if chain != "main":
+                message = "WARNING: Core is not on mainnet. Check your RPC endpoint."
+            elif type(blocks) is not int or type(headers) is not int or type(ibd) is not bool:
+                message = "Core replied, but blockchain status is incomplete."
+            else:
+                state = "Syncing / initial download" if ibd else "Initial download finished"
+                message = (
+                    f"Local Core connected (mainnet). Blocks: {blocks}; "
+                    f"headers: {headers}. {state}. "
+                    "This does not verify any wallet UTXOs or guarantee full synchronization.")
+            self.finished.emit(message)
+        except (CoreReadError, ValueError, OSError) as exc:
+            self.finished.emit("Core diagnostic failed: " + str(exc))
+        except Exception:
+            self.finished.emit("Core diagnostic failed unexpectedly")
+
+
+class WalletWindow(QMainWindow):
+    def __init__(self):
+        super().__init__()
+        self.setWindowTitle("FloofyWallet — Desktop Preview")
+        self.resize(1190, 760)
+        self.setMinimumSize(900, 600)
+        self.thread = None
+        self.worker = None
+        self.core_thread = None
+        self.core_worker = None
+        self.diagnostic_thread = None
+        self.diagnostic_worker = None
+        self.core_verified_outpoint = None
+        self.core_check_address = None
+        self.wallet_address = None
+        self.reported_utxos = None
+        self.utxo_page_complete = False
+        self.history_mode = 'wallet'
+        self.requested_address = None
+        self.requested_mode = None
+        root = QWidget()
+        root.setObjectName("root")
+        self.setCentralWidget(root)
+        outer = QHBoxLayout(root)
+        outer.setContentsMargins(0, 0, 0, 0)
+        outer.setSpacing(0)
+
+        sidebar = QFrame()
+        sidebar.setObjectName("sidebar")
+        sidebar.setFixedWidth(225)
+        side = QVBoxLayout(sidebar)
+        side.setContentsMargins(18, 25, 18, 20)
+        side.setSpacing(10)
+        side.addWidget(label("✦  FloofyWallet", 21, True))
+        side.addSpacing(25)
+        self.nav = {}
+        for name in ("Dashboard", "Receive", "Send", "History", "Settings"):
+            b = QPushButton(name)
+            b.clicked.connect(lambda checked=False, n=name: self.show_page(n))
+            side.addWidget(b)
+            self.nav[name] = b
+        side.addStretch()
+        mascot = self.image_label("Incubator_Icon.png", 150, 150, fallback="Floofy_Icone.png")
+        side.addWidget(mascot, alignment=Qt.AlignHCenter)
+        credit = QLabel('Made by: <a href="https://github.com/CryptoSirDev" style="color: #0879DF; text-decoration: underline;">CryptoSirDev</a>')
+        credit.setAlignment(Qt.AlignCenter)
+        credit.setOpenExternalLinks(True)
+        credit.setStyleSheet("font: 11px 'Segoe UI'; color: #6283A3;")
+        side.addWidget(credit, alignment=Qt.AlignHCenter)
+        outer.addWidget(sidebar)
+
+        self.pages = QStackedWidget()
+        outer.addWidget(self.pages, 1)
+        self.welcome = self.make_welcome()
+        self.pages.addWidget(self.welcome)
+        self.dashboard = self.make_dashboard()
+        self.pages.addWidget(self.dashboard)
+        self.receive = self.make_receive()
+        self.pages.addWidget(self.receive)
+        self.send = self.make_send()
+        self.pages.addWidget(self.send)
+        self.history_page = self.make_history()
+        self.pages.addWidget(self.history_page)
+        self.settings = self.make_settings()
+        self.pages.addWidget(self.settings)
+        self.show_page("Welcome")
+
+    def image_label(self, filename, width, height, fallback=None):
+        """Crop transparent margins before fitting an asset into its display area."""
+        w = QLabel()
+        w.setAlignment(Qt.AlignCenter)
+        w.setFixedSize(width, height)
+        path = ASSETS / filename
+        if not path.is_file() and fallback:
+            path = ASSETS / fallback
+        pix = QPixmap(str(path))
+        if pix.isNull():
+            w.setText("Image unavailable")
+            w.setStyleSheet("font-size: 11px;")
+            return w
+        if pix.hasAlphaChannel():
+            bounds = QRegion(pix.mask()).boundingRect()
+            if bounds.isValid() and not bounds.isEmpty():
+                pix = pix.copy(bounds)
+        elif filename == "Incubator_Icon.png":
+            # Some exported PNGs have opaque black padding instead of transparency.
+            # Detect it only when all four corners are nearly black.
+            sample = pix.toImage().scaled(400, 400, Qt.KeepAspectRatio, Qt.FastTransformation)
+            corners = (
+                sample.pixelColor(0, 0),
+                sample.pixelColor(sample.width() - 1, 0),
+                sample.pixelColor(0, sample.height() - 1),
+                sample.pixelColor(sample.width() - 1, sample.height() - 1),
+            )
+            if all(max(c.red(), c.green(), c.blue()) < 25 for c in corners):
+                left, top = sample.width(), sample.height()
+                right, bottom = -1, -1
+                for y in range(sample.height()):
+                    for x in range(sample.width()):
+                        c = sample.pixelColor(x, y)
+                        if max(c.red(), c.green(), c.blue()) > 35:
+                            left, top = min(left, x), min(top, y)
+                            right, bottom = max(right, x), max(bottom, y)
+                if right >= left and bottom >= top:
+                    scale_x = pix.width() / sample.width()
+                    scale_y = pix.height() / sample.height()
+                    pad_x = max(2, int((right - left + 1) * scale_x * 0.06))
+                    pad_y = max(2, int((bottom - top + 1) * scale_y * 0.06))
+                    x0 = max(0, int(left * scale_x) - pad_x)
+                    y0 = max(0, int(top * scale_y) - pad_y)
+                    x1 = min(pix.width(), int((right + 1) * scale_x) + pad_x)
+                    y1 = min(pix.height(), int((bottom + 1) * scale_y) + pad_y)
+                    pix = pix.copy(x0, y0, x1 - x0, y1 - y0)
+        w.setPixmap(pix.scaled(width, height, Qt.KeepAspectRatio, Qt.SmoothTransformation))
+        return w
+
+    def make_dashboard(self):
+        scroll = QScrollArea()
+        scroll.setWidgetResizable(True)
+        scroll.setFrameShape(QFrame.NoFrame)
+        content = QWidget()
+        col = QVBoxLayout(content)
+        col.setContentsMargins(28, 26, 28, 26)
+        col.setSpacing(20)
+        hero = QFrame()
+        hero.setObjectName("hero")
+        hero.setMinimumHeight(170)
+        h = QHBoxLayout(hero)
+        h.setContentsMargins(25, 15, 25, 15)
+        words = QVBoxLayout()
+        words.addWidget(label("FloofyWallet", 35, True))
+        words.addWidget(label("Your FLOOF, your keys, your future.", 15))
+        words.addStretch()
+        h.addLayout(words, 1)
+        h.addWidget(self.image_label("Floofy_Icon.png", 205, 150, fallback="logo.png"))
+        col.addWidget(hero)
+
+        wallet_card = panel()
+        wallet_card.layout().addWidget(label("Your wallet address", 15, True))
+        address_row = QHBoxLayout()
+        self.dashboard_address = QLineEdit()
+        self.dashboard_address.setReadOnly(True)
+        address_row.addWidget(self.dashboard_address, 1)
+        copy_address = QPushButton("Copy address")
+        copy_address.clicked.connect(self.copy_receive_address)
+        address_row.addWidget(copy_address)
+        wallet_card.layout().addLayout(address_row)
+        self.status = label("Explorer data may be delayed.", 11, muted=True)
+        wallet_card.layout().addWidget(self.status)
+        col.addWidget(wallet_card)
+
+        stats = QHBoxLayout()
+        balance = panel()
+        balance.layout().addWidget(label("Total balance", 14, True))
+        self.balance_label = label("— FLOOF", 29, True)
+        balance.layout().addWidget(self.balance_label)
+        stats.addWidget(balance, 2)
+        received = panel()
+        received.layout().addWidget(label("Received", 14, True))
+        self.received_label = label("—", 19, True)
+        received.layout().addWidget(self.received_label)
+        stats.addWidget(received, 1)
+        txs = panel()
+        txs.layout().addWidget(label("Transactions", 14, True))
+        self.txcount_label = label("—", 19, True)
+        txs.layout().addWidget(self.txcount_label)
+        stats.addWidget(txs, 1)
+        col.addLayout(stats)
+
+        activity = panel()
+        activity.layout().addWidget(label("Recent transactions", 19, True))
+        self.activity = label("No address loaded yet.", 12, muted=True)
+        activity.layout().addWidget(self.activity)
+        self.utxo_count = label("UTXOs: —", 12, muted=True)
+        activity.layout().addWidget(self.utxo_count)
+        col.addWidget(activity)
+        col.addStretch()
+        scroll.setWidget(content)
+        return scroll
+
+    def make_welcome(self):
+        w = QWidget()
+        layout = QVBoxLayout(w)
+        layout.setContentsMargins(48, 40, 48, 40)
+        layout.setSpacing(16)
+        layout.addWidget(self.image_label("Floofy_Icon.png", 210, 180, fallback="logo.png"), alignment=Qt.AlignHCenter)
+        welcome_title = label("Welcome to FloofyWallet", 30, True)
+        welcome_title.setWordWrap(False)
+        welcome_title.setAlignment(Qt.AlignCenter)
+        layout.addWidget(welcome_title)
+        layout.addWidget(label("Experimental test wallets only. No real funds.", 14, muted=True))
+        for title, action in (("Create test wallet", self.create_wallet),
+                              ("Import test WIF", self.import_wallet),
+                              ("Unlock encrypted wallet", self.open_wallet)):
+            button = QPushButton(title)
+            button.setObjectName("primary")
+            button.clicked.connect(action)
+            layout.addWidget(button)
+        layout.addStretch()
+        return w
+
+    def recovery_dialog(self, wif, address):
+        dialog = QDialog(self)
+        dialog.setWindowTitle("TEST recovery key — shown once")
+        dialog.resize(660, 300)
+        layout = QVBoxLayout(dialog)
+        layout.addWidget(label("Save this test WIF offline. Anyone with it controls the wallet.", 13, True))
+        field = QLineEdit(wif)
+        field.setReadOnly(True)
+        field.setEchoMode(QLineEdit.Password)
+        layout.addWidget(field)
+        show = QCheckBox("Show recovery WIF")
+        show.toggled.connect(lambda visible: field.setEchoMode(QLineEdit.Normal if visible else QLineEdit.Password))
+        layout.addWidget(show)
+        copy = QPushButton("Copy WIF (clipboard is not secure)")
+        copy.clicked.connect(lambda: QApplication.clipboard().setText(wif))
+        layout.addWidget(copy)
+        layout.addWidget(label("Public address: " + address, 12))
+        confirmed = QCheckBox("I have saved my TEST recovery WIF.")
+        layout.addWidget(confirmed)
+        proceed = QPushButton("Continue to wallet")
+        proceed.setObjectName("primary")
+        proceed.setEnabled(False)
+        confirmed.toggled.connect(proceed.setEnabled)
+        proceed.clicked.connect(dialog.accept)
+        layout.addWidget(proceed)
+        return dialog.exec_() == QDialog.Accepted
+
+    def make_receive(self):
+        w = QWidget()
+        layout = QVBoxLayout(w)
+        layout.setContentsMargins(36, 30, 36, 30)
+        layout.setSpacing(15)
+        layout.addWidget(label("Receive FLOOF", 26, True))
+        layout.addWidget(label("Share only this public address to receive test FLOOF. Never share your WIF.", 13, muted=True))
+
+        card = panel()
+        card.layout().addWidget(label("Your unlocked wallet address", 16, True))
+        self.receive_address = QLineEdit()
+        self.receive_address.setReadOnly(True)
+        self.receive_address.setPlaceholderText("Unlock a test wallet to see its address")
+        card.layout().addWidget(self.receive_address)
+
+        self.receive_qr = QLabel()
+        self.receive_qr.setAlignment(Qt.AlignCenter)
+        self.receive_qr.setMinimumHeight(280)
+        card.layout().addWidget(self.receive_qr)
+
+        self.receive_copy = QPushButton("Copy public address")
+        self.receive_copy.setObjectName("primary")
+        self.receive_copy.clicked.connect(self.copy_receive_address)
+        card.layout().addWidget(self.receive_copy)
+        self.receive_feedback = label("", 12, muted=True)
+        card.layout().addWidget(self.receive_feedback)
+        layout.addWidget(card)
+        layout.addWidget(label(
+            "QR contains the public address only (no WIF). "
+            "Explorer balances may lag behind the blockchain. Test wallets only.",
+            12, muted=True))
+        layout.addStretch()
+        self.update_receive()
+        return w
+
+    def update_receive(self):
+        address = self.wallet_address
+        self.receive_address.setText(address or "")
+        self.receive_copy.setEnabled(bool(address))
+        self.receive_feedback.setText("")
+        if not address:
+            self.receive_qr.clear()
+            self.receive_qr.setText("Unlock a test wallet to display its QR code.")
+            return
+        # Plain address, rather than an unsupported payment URI scheme.
+        qr = qrcode.QRCode(error_correction=qrcode.constants.ERROR_CORRECT_M,
+                           box_size=8, border=4)
+        qr.add_data(address)
+        qr.make(fit=True)
+        buffer = BytesIO()
+        qr.make_image(fill_color="black", back_color="white").save(buffer, format="PNG")
+        pixmap = QPixmap()
+        if pixmap.loadFromData(buffer.getvalue(), "PNG"):
+            self.receive_qr.setPixmap(pixmap.scaled(
+                280, 280, Qt.KeepAspectRatio, Qt.SmoothTransformation))
+        else:
+            self.receive_qr.setText("QR unavailable. Copy the address above.")
+
+    def copy_receive_address(self):
+        if not self.wallet_address:
+            return
+        QApplication.clipboard().setText(self.wallet_address)
+        self.receive_feedback.setText("Public address copied to clipboard.")
+
+    def make_send(self):
+        scroll = QScrollArea()
+        scroll.setWidgetResizable(True)
+        scroll.setFrameShape(QFrame.NoFrame)
+        w = QWidget()
+        layout = QVBoxLayout(w)
+        layout.setContentsMargins(36, 32, 36, 32)
+        layout.setSpacing(15)
+        layout.addWidget(label("Send FLOOF", 26, True))
+        layout.addWidget(label(
+            "Transaction preview only. Signing and broadcasting are disabled. "
+            "Do not use real funds.", 13, muted=True))
+        card = panel()
+        card.layout().addWidget(label("Destination address", 15, True))
+        self.send_destination = QLineEdit()
+        self.send_destination.setPlaceholderText("FloofyChain mainnet address (F...)")
+        card.layout().addWidget(self.send_destination)
+        self.destination_error = label("", 12)
+        self.destination_error.setStyleSheet("color: #b42318;")
+        card.layout().addWidget(self.destination_error)
+        card.layout().addWidget(label("Amount (FLOOF)", 15, True))
+        self.send_amount = QLineEdit()
+        self.send_amount.setPlaceholderText("e.g. 10.00000000")
+        card.layout().addWidget(self.send_amount)
+        self.amount_error = label("", 12)
+        self.amount_error.setStyleSheet("color: #b42318;")
+        card.layout().addWidget(self.amount_error)
+        self.send_destination.textChanged.connect(self.on_send_fields_changed)
+        self.send_amount.textChanged.connect(self.on_send_fields_changed)
+        card.layout().addWidget(label("Estimated network fee (FLOOF)", 15, True))
+        self.send_fee = QLineEdit()
+        self.send_fee.setReadOnly(True)
+        self.send_fee.setText("Unavailable — UTXOs and fee rate not verified")
+        card.layout().addWidget(self.send_fee)
+        self.send_utxo_status = label("UTXO status: no data loaded. Explorer data is not proof of spendability.", 12, muted=True)
+        card.layout().addWidget(self.send_utxo_status)
+        layout.addWidget(card)
+        demo_card = panel()
+        demo_card.layout().addWidget(label("Offline demonstration — fictional FLOOF", 15, True))
+        self.demo_mode = QCheckBox("Use fictional UTXOs for this preview only")
+        self.demo_mode.setChecked(False)
+        self.demo_mode.toggled.connect(self.on_send_fields_changed)
+        demo_card.layout().addWidget(self.demo_mode)
+        demo_card.layout().addWidget(label(
+            "Demo inputs: 6 + 6 + 20 FLOOF. No wallet balances are changed. "
+            "Sending remains disabled.", 12, muted=True))
+        layout.addWidget(demo_card)
+        self.send_feedback = label(
+            "Network fee will be calculated automatically once verified UTXOs "
+            "and fee estimation are implemented. No manual fee entry.", 12, muted=True)
+        layout.addWidget(self.send_feedback)
+        preview = QPushButton("Preview transaction")
+        preview.setObjectName("primary")
+        preview.clicked.connect(self.preview_send)
+        layout.addWidget(preview)
+        self.send_preview = panel()
+        self.send_preview.layout().addWidget(label("No transaction preview yet.", 13, muted=True))
+        layout.addWidget(self.send_preview)
+        self.coin_preview = label(
+            "Automatic coin-selection preview: waiting for explorer UTXOs. "
+            "Not a spendability check.", 12, muted=True)
+        layout.addWidget(self.coin_preview)
+        fees = panel()
+        fees.layout().addWidget(label("Transaction Fee — TEST PREVIEW", 16, True))
+        fees.layout().addWidget(label(
+            "Core 4.0.4 reference rate, not a live network recommendation. "
+            "The wallet handles UTXO selection internally.", 12, muted=True))
+        self.fee_choice = QButtonGroup(self)
+        self.fee_recommended = QRadioButton("Recommended (Core reference): 0.01000000 FLOOF/kB")
+        self.fee_custom = QRadioButton("Custom fee rate (FLOOF/kB)")
+        self.fee_choice.addButton(self.fee_recommended)
+        self.fee_choice.addButton(self.fee_custom)
+        self.fee_recommended.setChecked(True)
+        fees.layout().addWidget(self.fee_recommended)
+        fees.layout().addWidget(self.fee_custom)
+        self.custom_fee_rate = QLineEdit()
+        self.custom_fee_rate.setPlaceholderText("e.g. 0.02000000")
+        self.custom_fee_rate.setText("0.02000000")
+        self.custom_fee_rate.setEnabled(False)
+        fees.layout().addWidget(self.custom_fee_rate)
+        self.fee_recommended.toggled.connect(self.update_fee_preview)
+        self.fee_recommended.toggled.connect(self.on_send_fields_changed)
+        self.custom_fee_rate.textChanged.connect(self.update_fee_preview)
+        self.custom_fee_rate.textChanged.connect(self.on_send_fields_changed)
+        self.fee_result = label("", 13, True)
+        fees.layout().addWidget(self.fee_result)
+        fees.layout().addWidget(label(
+            "Illustration only. A higher fee may improve priority but cannot guarantee confirmation. "
+            "The actual Send fee remains unavailable until UTXOs and serialization are verified.", 12, muted=True))
+        layout.addWidget(fees)
+        self.update_fee_preview()
+        layout.addStretch()
+        scroll.setWidget(w)
+        return scroll
+
+    def diagnose_local_core(self):
+        if self.diagnostic_thread is not None:
+            return
+        url = self.core_url.text().strip()
+        username = self.core_user.text().strip()
+        password = self.core_password.text()
+        self.core_password.clear()
+        try:
+            LocalCoreReader(url, username, password)
+        except ValueError as exc:
+            self.core_diagnostic_status.setText(str(exc))
+            return
+        self.core_diagnostic_button.setEnabled(False)
+        self.core_diagnostic_status.setText("Connecting to local Core (read-only)...")
+        self.diagnostic_thread = QThread(self)
+        self.diagnostic_worker = CoreDiagnosticWorker(url, username, password)
+        self.diagnostic_worker.moveToThread(self.diagnostic_thread)
+        self.diagnostic_thread.started.connect(self.diagnostic_worker.run)
+        self.diagnostic_worker.finished.connect(self.core_diagnostic_status.setText)
+        self.diagnostic_worker.finished.connect(self.diagnostic_thread.quit)
+        self.diagnostic_worker.finished.connect(self.diagnostic_worker.deleteLater)
+        self.diagnostic_thread.finished.connect(self.diagnostic_thread.deleteLater)
+        self.diagnostic_thread.finished.connect(self.diagnostic_finished)
+        self.diagnostic_thread.start()
+
+    def diagnostic_finished(self):
+        self.diagnostic_thread = None
+        self.diagnostic_worker = None
+        self.core_diagnostic_button.setEnabled(True)
+
+    def verify_local_core(self):
+        if self.core_thread is not None:
+            return
+        if self.demo_mode.isChecked():
+            self.core_check_status.setText("Turn off fictional demo mode before checking real UTXOs.")
+            return
+        if self.wallet_address is None or self.reported_utxos is None or not self.utxo_page_complete:
+            self.core_check_status.setText("Load a complete explorer UTXO list first.")
+            return
+        if not self.reported_utxos:
+            self.core_check_status.setText("Explorer reports no UTXOs for this wallet.")
+            return
+        url = self.core_url.text().strip()
+        username = self.core_user.text().strip()
+        password = self.core_password.text()
+        self.core_password.clear()
+        try:
+            # Reject nonlocal URLs before starting a worker.
+            LocalCoreReader(url, username, password)
+        except ValueError as exc:
+            self.core_check_status.setText(str(exc))
+            return
+        self.core_verified_outpoint = None
+        self.core_check_address = self.wallet_address
+        self.core_check_button.setEnabled(False)
+        self.core_check_status.setText("Checking first explorer UTXO with local Core...")
+        self.core_thread = QThread(self)
+        self.core_worker = CoreCheckWorker(url, username, password, self.wallet_address, self.reported_utxos[0])
+        self.core_worker.moveToThread(self.core_thread)
+        self.core_thread.started.connect(self.core_worker.run)
+        self.core_worker.verified.connect(self.record_core_verification)
+        self.core_worker.finished.connect(self.core_check_status.setText)
+        self.core_worker.finished.connect(self.core_thread.quit)
+        self.core_worker.finished.connect(self.core_worker.deleteLater)
+        self.core_thread.finished.connect(self.core_thread.deleteLater)
+        self.core_thread.finished.connect(self.core_check_finished)
+        self.core_thread.start()
+
+    def record_core_verification(self, outpoint):
+        if (self.wallet_address == self.core_check_address
+                and self.reported_utxos is not None
+                and any((u.txid, u.vout, u.amount) == outpoint
+                        for u in self.reported_utxos)):
+            self.core_verified_outpoint = outpoint
+            self.send_utxo_status.setText(
+                "LOCAL CORE: one explorer-reported outpoint confirmed unspent. "
+                "Other UTXOs, ownership and spendability remain unverified.")
+
+    def core_check_finished(self):
+        self.core_thread = None
+        self.core_worker = None
+        self.core_check_button.setEnabled(True)
+
+    def update_fee_preview(self, *_):
+        custom = self.fee_custom.isChecked()
+        self.custom_fee_rate.setVisible(custom)
+        self.custom_fee_rate.setEnabled(custom)
+        try:
+            rate = parse_decimal_input(self.custom_fee_rate.text()) if custom else Decimal("0.01000000")
+            if not rate.is_finite() or rate < Decimal("0.01000000") or rate > Decimal("100"):
+                raise ValueError("Fee rate must be between 0.01000000 and 100 FLOOF/kB")
+            self.fee_result.setText(
+                f"Selected reference rate: {rate:.8f} FLOOF/kB\n"
+                "Transaction fee: unavailable until verified UTXOs and transaction size are known.")
+        except (InvalidOperation, ValueError):
+            self.fee_result.setText("Enter a valid custom rate of at least 0.01000000 FLOOF/kB.")
+
+    def clear_send_preview(self):
+        box = self.send_preview.layout()
+        while box.count():
+            item = box.takeAt(0)
+            if item.widget():
+                item.widget().deleteLater()
+        box.addWidget(label("No transaction preview yet.", 13, muted=True))
+
+    def on_send_fields_changed(self, *_):
+        self.clear_send_preview()
+        self.send_feedback.setText("Enter a destination and amount, then preview the transaction.")
+        self.coin_preview.setText("Automatic coin-selection preview: waiting for a new preview.")
+        address = self.send_destination.text().strip()
+        amount_text = self.send_amount.text().strip()
+        self.destination_error.setText(
+            "Invalid FloofyChain destination address." if address and not validate_address(address) else "")
+        self.amount_error.setText("")
+        if amount_text:
+            try:
+                value = parse_decimal_input(amount_text)
+                unit = Decimal("0.00000001")
+                if not value.is_finite() or value <= 0 or value != value.quantize(unit):
+                    self.amount_error.setText("Enter a positive amount with at most 8 decimal places.")
+            except (InvalidOperation, ValueError):
+                self.amount_error.setText("Enter a valid decimal amount.")
+
+    def preview_send(self):
+        address = self.send_destination.text().strip()
+        amount_text = self.send_amount.text().strip()
+        if not validate_address(address):
+            self.destination_error.setText("Invalid FloofyChain destination address.")
+            self.clear_send_preview()
+            return
+        try:
+            amount = parse_decimal_input(amount_text)
+        except (InvalidOperation, ValueError):
+            self.amount_error.setText("Enter a valid decimal amount.")
+            self.clear_send_preview()
+            return
+        unit = Decimal("0.00000001")
+        if not amount.is_finite() or amount <= 0 or amount != amount.quantize(unit):
+            self.amount_error.setText("Enter a positive amount with at most 8 decimal places.")
+            self.clear_send_preview()
+            return
+        self.destination_error.setText("")
+        self.amount_error.setText("")
+        # Exploratory calculation from a bounded complete explorer pagination snapshot.
+        # It is not a verified balance or a spendable quote.
+        demo = self.demo_mode.isChecked()
+        if demo:
+            self.send_utxo_status.setText(
+                "FICTIONAL DEMO: simulated UTXOs only. No real funds or spendability.")
+        elif self.wallet_address is None:
+            self.send_utxo_status.setText("LOCKED: open a test wallet to load UTXOs.")
+        elif self.reported_utxos is None:
+            self.send_utxo_status.setText("NOT LOADED: no explorer UTXO snapshot available.")
+        elif not self.utxo_page_complete:
+            self.send_utxo_status.setText(
+                "INCOMPLETE: explorer UTXO pages are missing; no reliable selection.")
+        elif self.core_verified_outpoint is not None:
+            self.send_utxo_status.setText(
+                "LOCAL CORE: one reported UTXO confirmed unspent. "
+                "Remaining UTXOs and wallet spendability NOT verified.")
+        else:
+            self.send_utxo_status.setText(
+                f"EXPLORER ONLY: {len(self.reported_utxos)} reported UTXO(s). "
+                "Unverified; ownership and spendability not established.")
+        available_utxos = (tuple(
+            SimpleNamespace(txid=f"{n:064x}", vout=0, amount=Decimal(value))
+            for n, value in ((1, "6"), (2, "6"), (3, "20"))
+        ) if demo else self.reported_utxos)
+        if self.wallet_address is None:
+            self.coin_preview.setText("Automatic coin selection unavailable: wallet locked.")
+        elif not demo and self.reported_utxos is None:
+            self.coin_preview.setText("Automatic coin selection unavailable: UTXOs not loaded.")
+        elif not demo and not self.utxo_page_complete:
+            self.coin_preview.setText("Automatic coin selection unavailable: UTXO listing has more pages.")
+        else:
+            try:
+                rate = (parse_decimal_input(self.custom_fee_rate.text()) if self.fee_custom.isChecked()
+                        else Decimal("0.01000000"))
+                if not rate.is_finite() or rate < Decimal("0.01000000") or rate > Decimal("100"):
+                    raise ValueError("Invalid reference fee rate")
+                selection = preview_selection(available_utxos, amount, rate)
+                self.coin_preview.setText(
+                    f"{'FICTIONAL OFFLINE DEMO' if demo else 'UNVERIFIED explorer simulation'}: {len(selection.selected)} input(s), "
+                    f"{selection.output_count} output(s), {selection.estimated_bytes} estimated bytes; "
+                    f"fee {selection.estimated_fee:.8f} FLOOF; "
+                    f"change {selection.change:.8f} FLOOF. "
+                    "No proof of spendability. No transaction will be sent.")
+            except (ValueError, InvalidOperation) as exc:
+                self.coin_preview.setText(
+                    ("Fictional demo unavailable: " if demo else "Automatic explorer simulation unavailable: ") + str(exc) +
+                    ". No spendable balance established.")
+        self.send_feedback.setText(
+            "Fee calculation pending verified UTXOs, transaction size and network fee rate. "
+            "This preview cannot be sent.")
+        box = self.send_preview.layout()
+        while box.count():
+            item = box.takeAt(0)
+            if item.widget():
+                item.widget().deleteLater()
+        box.addWidget(label("FICTIONAL DEMO — NOT BROADCAST" if demo else "Transaction preview — NOT BROADCAST", 16, True))
+        box.addWidget(label("From: " + (self.wallet_address or "Locked"), 12))
+        box.addWidget(label("To: " + address, 12))
+        box.addWidget(label(f"Amount: {amount:.8f} FLOOF", 14, True))
+        if demo and 'selection' in locals():
+            box.addWidget(label("OFFLINE SIMULATION — FICTIONAL VALUES", 16, True))
+            box.addWidget(label(
+                f"Inputs: {len(selection.selected)} | Outputs: {selection.output_count} | "
+                f"Estimated size: {selection.estimated_bytes} bytes", 14, True))
+            box.addWidget(label(f"Simulated fee: {selection.estimated_fee:.8f} FLOOF", 16, True))
+            box.addWidget(label(f"Simulated change: {selection.change:.8f} FLOOF", 16, True))
+            box.addWidget(label(
+                f"Amount + simulated fee: {amount + selection.estimated_fee:.8f} FLOOF", 16, True))
+            box.addWidget(label("FICTIONAL ONLY — not a real fee quote or spendable balance.", 13, True))
+            self.coin_preview.setText("Fictional simulation results are displayed above.")
+        elif demo:
+            box.addWidget(label("Fictional simulation unavailable — see details below.", 15, True))
+        else:
+            if self.core_verified_outpoint is not None:
+                box.addWidget(label(
+                    "Local Core checked one reported UTXO only; no proof of wallet spendability.", 13, True))
+            box.addWidget(label("Estimated network fee: unavailable", 13))
+            box.addWidget(label("Total including fee: pending estimation", 15, True))
+        disabled = QPushButton("Confirm send — unavailable in preview")
+        disabled.setEnabled(False)
+        box.addWidget(disabled)
+
+    def make_history(self):
+        w = QWidget()
+        outer = QVBoxLayout(w)
+        outer.setContentsMargins(36, 36, 36, 36)
+        outer.setSpacing(14)
+        outer.addWidget(label("Transaction history", 26, True))
+        outer.addWidget(label("Confirmed transactions for your unlocked wallet address. Explorer data may be delayed.", 13, muted=True))
+        modes = QHBoxLayout()
+        self.wallet_history_button = QPushButton("My wallet")
+        self.public_history_button = QPushButton("Explore address")
+        self.wallet_history_button.clicked.connect(lambda: self.switch_history_mode("wallet"))
+        self.public_history_button.clicked.connect(lambda: self.switch_history_mode("public"))
+        modes.addWidget(self.wallet_history_button)
+        modes.addWidget(self.public_history_button)
+        outer.addLayout(modes)
+        self.history_address = label("No wallet unlocked", 13, True)
+        outer.addWidget(self.history_address)
+        self.public_address_input = QLineEdit()
+        self.public_address_input.setPlaceholderText("Paste a public FloofyChain address")
+        self.public_address_input.returnPressed.connect(self.refresh_wallet_history)
+        outer.addWidget(self.public_address_input)
+        self.public_address_input.hide()
+        refresh = QPushButton("Refresh history")
+        refresh.setObjectName("primary")
+        refresh.clicked.connect(self.refresh_wallet_history)
+        outer.addWidget(refresh)
+        self.history_note = label("No history loaded yet.", 12, muted=True)
+        outer.addWidget(self.history_note)
+        scroll = QScrollArea()
+        scroll.setWidgetResizable(True)
+        scroll.setFrameShape(QFrame.NoFrame)
+        self.history_rows = QWidget()
+        self.history_layout = QVBoxLayout(self.history_rows)
+        self.history_layout.setContentsMargins(0, 0, 0, 0)
+        self.history_layout.setSpacing(9)
+        self.history_layout.addStretch()
+        scroll.setWidget(self.history_rows)
+        outer.addWidget(scroll, 1)
+        return w
+
+    def clear_history(self):
+        while self.history_layout.count():
+            item = self.history_layout.takeAt(0)
+            if item.widget():
+                item.widget().deleteLater()
+        self.history_layout.addStretch()
+
+    def switch_history_mode(self, mode):
+        self.history_mode = mode
+        self.public_address_input.setVisible(mode == "public")
+        self.history_address.setVisible(mode == "wallet")
+        for button, active in ((self.wallet_history_button, mode == "wallet"),
+                               (self.public_history_button, mode == "public")):
+            button.setObjectName("selected" if active else "")
+            button.style().unpolish(button)
+            button.style().polish(button)
+        self.clear_history()
+        self.history_note.setText("Enter an address and refresh." if mode == "public"
+                                  else "Click Refresh history to load your transactions.")
+
+    def refresh_wallet_history(self):
+        address = self.wallet_address if self.history_mode == "wallet" else self.public_address_input.text().strip()
+        if not address or not validate_address(address):
+            self.history_note.setText("Enter a valid FloofyChain address.")
+            return
+        self.history_note.setText("Loading confirmed transactions…")
+        self.load_address(address, self.history_mode)
+
+    def populate_history(self, transactions, txcount):
+        self.clear_history()
+        self.history_note.setText(
+            f"Showing {len(transactions)} confirmed transaction(s) from the first explorer page "
+            f"of {txcount} reported. Not a complete history if more exist."
+        )
+        if not transactions:
+            self.history_note.setText("No confirmed transactions on the first explorer page.")
+            return
+        for tx in sorted(transactions, key=lambda t: (t.block_height, t.timestamp, t.txid), reverse=True):
+            card = panel()
+            when = datetime.fromtimestamp(tx.timestamp, tz=timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
+            direction = "Received" if tx.amount > 0 else ("Sent" if tx.amount < 0 else "Neutral / internal")
+            card.layout().addWidget(label(f"{direction}    {tx.amount:+.8f} FLOOF", 15, True))
+            card.layout().addWidget(label(f"{when}    •    Block {tx.block_height}", 12, muted=True))
+            tx_label = label("TXID: " + tx.txid, 11)
+            tx_label.setTextInteractionFlags(Qt.TextSelectableByMouse)
+            card.layout().addWidget(tx_label)
+            copy_button = QPushButton("Copy TXID")
+            copy_button.clicked.connect(lambda checked=False, txid=tx.txid: QApplication.clipboard().setText(txid))
+            card.layout().addWidget(copy_button)
+            self.history_layout.insertWidget(self.history_layout.count() - 1, card)
+
+    def make_settings(self):
+        scroll = QScrollArea()
+        scroll.setWidgetResizable(True)
+        scroll.setFrameShape(QFrame.NoFrame)
+        w = QWidget()
+        layout = QVBoxLayout(w)
+        layout.setContentsMargins(36, 36, 36, 36)
+        layout.setSpacing(14)
+        layout.addWidget(label("Encrypted test wallet", 26, True))
+        layout.addWidget(label("Experimental and unaudited. Never import real keys or send funds.", 13, muted=True))
+        self.wallet_status = label("No wallet opened", 14, True)
+        layout.addWidget(self.wallet_status)
+        for title, callback in (
+            ("Create another test wallet", self.create_wallet),
+            ("Import another test WIF", self.import_wallet),
+            ("Lock wallet", self.lock_wallet),
+        ):
+            button = QPushButton(title)
+            button.clicked.connect(callback)
+            layout.addWidget(button)
+        layout.addWidget(label("Advanced — Developer Tools", 18, True))
+        self.show_core_tools = QCheckBox("Show local Core verification tools (advanced)")
+        self.show_core_tools.setChecked(False)
+        layout.addWidget(self.show_core_tools)
+        core_card = panel()
+        core_card.layout().addWidget(label("Verify explorer UTXO with Local Core — READ ONLY", 15, True))
+        core_card.layout().addWidget(label(
+            "Checks the first explorer-reported UTXO only. Does not prove ownership or spendability. "
+            "Keep RPC local; credentials are not saved.", 12, muted=True))
+        self.core_url = QLineEdit("http://127.0.0.1:6662")
+        self.core_url.setPlaceholderText("Local RPC URL and port")
+        self.core_user = QLineEdit()
+        self.core_user.setPlaceholderText("RPC username")
+        self.core_password = QLineEdit()
+        self.core_password.setPlaceholderText("RPC password (never saved)")
+        self.core_password.setEchoMode(QLineEdit.Password)
+        for field in (self.core_url, self.core_user, self.core_password):
+            core_card.layout().addWidget(field)
+        self.core_diagnostic_button = QPushButton("Test local Core connection (no wallet funds required)")
+        self.core_diagnostic_button.clicked.connect(self.diagnose_local_core)
+        core_card.layout().addWidget(self.core_diagnostic_button)
+        self.core_diagnostic_status = label("Core connection not tested.", 13, True)
+        core_card.layout().addWidget(self.core_diagnostic_status)
+        core_card.layout().addWidget(label(
+            "Diagnostic uses getblockchaininfo only. It never accesses wallet keys, "
+            "sends transactions, or changes Core settings.", 12, muted=True))
+        self.core_check_button = QPushButton("Verify first explorer UTXO with Local Core")
+        self.core_check_button.clicked.connect(self.verify_local_core)
+        core_card.layout().addWidget(self.core_check_button)
+        self.core_check_status = label("No local Core verification performed.", 13, True)
+        core_card.layout().addWidget(self.core_check_status)
+        layout.addWidget(core_card)
+        core_card.setVisible(False)
+        self.show_core_tools.toggled.connect(core_card.setVisible)
+        layout.addStretch()
+        scroll.setWidget(w)
+        return scroll
+
+    def password_dialog(self, title, confirm=False):
+        dialog = QDialog(self)
+        dialog.setWindowTitle(title)
+        form = QFormLayout(dialog)
+        password = QLineEdit()
+        password.setEchoMode(QLineEdit.Password)
+        form.addRow("Password (12+ characters):", password)
+        repeated = None
+        if confirm:
+            repeated = QLineEdit()
+            repeated.setEchoMode(QLineEdit.Password)
+            form.addRow("Confirm password:", repeated)
+        buttons = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
+        form.addRow(buttons)
+        buttons.accepted.connect(dialog.accept)
+        buttons.rejected.connect(dialog.reject)
+        if dialog.exec_() != QDialog.Accepted:
+            return None
+        value = password.text()
+        if len(value) < 12 or (repeated is not None and repeated.text() != value):
+            QMessageBox.warning(self, "Password error", "Use 12+ characters and matching passwords.")
+            return None
+        return value
+
+    def save_test_wallet(self, wif, password):
+        # Generate and encrypt once; retry only the destination filename.
+        vault = encrypt_wif(wif, password)
+        suggested = ""
+        while True:
+            filename, _ = QFileDialog.getSaveFileName(
+                self, "Save encrypted test wallet", suggested, "Floofy vault (*.floofvault)")
+            if not filename:
+                return False
+            path = Path(filename)
+            if path.suffix.lower() != ".floofvault":
+                path = path.with_suffix(".floofvault")
+            suggested = str(path)
+            if path.exists():
+                QMessageBox.warning(
+                    self, "File exists",
+                    "This vault already exists. Please choose another filename. "
+                    "Existing vaults are never overwritten.")
+                continue
+            try:
+                save_vault(path, vault)
+            except FileExistsError:
+                QMessageBox.warning(
+                    self, "File exists",
+                    "Another file now uses this name. Choose another filename.")
+                continue
+            return path
+
+    def activate_wallet(self, path, address):
+        self.wallet_address = address
+        self.history_address.setText("Wallet: " + address)
+        self.dashboard_address.setText(address)
+        self.switch_history_mode("wallet")
+        self.clear_history()
+        self.history_note.setText("Loading confirmed transactions…")
+        self.wallet_status.setText("Unlocked test wallet: " + address)
+        self.update_receive()
+        self.show_page("Dashboard")
+        self.load_address(address, "wallet")
+
+    def create_wallet(self):
+        if QMessageBox.warning(self, "Test wallets only",
+                "Create a disposable test wallet? Do not deposit real funds. "
+                "You must record the recovery WIF offline.",
+                QMessageBox.Ok | QMessageBox.Cancel) != QMessageBox.Ok:
+            return
+        password = self.password_dialog("Create test wallet", confirm=True)
+        if password is None:
+            return
+        try:
+            wif, address = generate_wallet()
+            path = self.save_test_wallet(wif, password)
+            if path:
+                if self.recovery_dialog(wif, address):
+                    self.activate_wallet(path, address)
+                else:
+                    self.show_page("Welcome")
+        except (OSError, ValueError, VaultError) as exc:
+            QMessageBox.warning(self, "Wallet error", str(exc))
+
+    def import_wallet(self):
+        dialog = QDialog(self)
+        dialog.setWindowTitle("Import disposable TEST WIF")
+        form = QFormLayout(dialog)
+        field = QLineEdit()
+        field.setEchoMode(QLineEdit.Password)
+        form.addRow("Test WIF:", field)
+        buttons = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
+        form.addRow(buttons)
+        buttons.accepted.connect(dialog.accept)
+        buttons.rejected.connect(dialog.reject)
+        if dialog.exec_() != QDialog.Accepted:
+            return
+        wif = field.text().strip()
+        try:
+            address_from_wif(wif)
+        except ValueError:
+            QMessageBox.warning(self, "Invalid WIF", "Invalid FloofyChain mainnet WIF.")
+            return
+        password = self.password_dialog("Encrypt imported test WIF", confirm=True)
+        if password is None:
+            return
+        try:
+            path = self.save_test_wallet(wif, password)
+            if path:
+                self.activate_wallet(path, address_from_wif(wif))
+        except (OSError, ValueError, VaultError) as exc:
+            QMessageBox.warning(self, "Wallet error", str(exc))
+
+    def open_wallet(self):
+        filename, _ = QFileDialog.getOpenFileName(self, "Open encrypted test wallet", "", "Floofy vault (*.floofvault)")
+        if not filename:
+            return
+        password = self.password_dialog("Unlock test wallet")
+        if password is None:
+            return
+        try:
+            vault = load_vault(filename)
+            wif = decrypt_wif(vault, password)
+            address = address_from_wif(wif)
+            del wif
+            self.activate_wallet(filename, address)
+        except (OSError, ValueError, VaultError) as exc:
+            QMessageBox.warning(self, "Cannot unlock", str(exc))
+
+    def lock_wallet(self):
+        self.wallet_address = None
+        self.reported_utxos = None
+        self.core_verified_outpoint = None
+        self.utxo_page_complete = False
+        self.history_address.setText("No wallet unlocked")
+        self.clear_history()
+        self.history_note.setText("Wallet locked; history cleared.")
+        self.wallet_status.setText("Wallet locked")
+        self.update_receive()
+        self.dashboard_address.clear()
+        self.public_address_input.clear()
+        self.switch_history_mode("wallet")
+        self.balance_label.setText("— FLOOF")
+        self.received_label.setText("—")
+        self.txcount_label.setText("—")
+        self.activity.setText("No address loaded yet.")
+        self.utxo_count.setText("UTXOs: —")
+        self.status.setText("Wallet locked.")
+        self.send_destination.clear()
+        self.send_amount.clear()
+        self.send_fee.setText("Unavailable — UTXOs and fee rate not verified")
+        self.send_feedback.setText("Wallet locked. Transaction preview only.")
+        self.send_utxo_status.setText("UTXO data: not loaded or verified")
+        self.coin_preview.setText("Automatic coin-selection preview: wallet locked.")
+        self.show_page("Welcome")
+
+    def make_simple_page(self, title, description):
+        w = QWidget()
+        layout = QVBoxLayout(w)
+        layout.setContentsMargins(36, 36, 36, 36)
+        layout.addWidget(label(title, 26, True))
+        layout.addWidget(label(description, 14, muted=True))
+        layout.addStretch()
+        return w
+
+    def show_page(self, name):
+        if self.wallet_address is None and name != "Welcome":
+            name = "Welcome"
+        index = ("Welcome", "Dashboard", "Receive", "Send", "History", "Settings").index(name)
+        for button in self.nav.values():
+            button.setVisible(self.wallet_address is not None)
+        self.pages.setCurrentIndex(index)
+        for key, button in self.nav.items():
+            button.setObjectName("selected" if key == name else "")
+            button.style().unpolish(button)
+            button.style().polish(button)
+
+    def load_address(self, address, mode="wallet"):
+        address = address.strip()
+        if not validate_address(address):
+            QMessageBox.warning(self, "Invalid address", "Enter a valid FloofyChain mainnet address.")
+            return
+        if self.thread is not None:
+            return
+        self.status.setText("Loading explorer data…")
+        self.requested_address = address
+        self.requested_mode = mode
+        self.thread = QThread()
+        self.worker = AddressWorker(address)
+        self.worker.moveToThread(self.thread)
+        self.thread.started.connect(self.worker.run)
+        self.worker.finished.connect(self.loaded)
+        self.worker.failed.connect(self.load_failed)
+        self.worker.finished.connect(self.thread.quit)
+        self.worker.failed.connect(self.thread.quit)
+        self.thread.finished.connect(self.worker.deleteLater)
+        self.thread.finished.connect(self.thread.deleteLater)
+        self.thread.finished.connect(self.cleanup_worker)
+        self.thread.start()
+
+    def cleanup_worker(self):
+        self.thread = None
+        self.worker = None
+
+
+    def loaded(self, summary, history, utxos, has_more):
+        requested = self.requested_address
+        mode = self.requested_mode
+        if mode == "public":
+            if self.history_mode == "public" and requested == self.public_address_input.text().strip():
+                self.populate_history(history, summary.txcount)
+            return
+        if requested != self.wallet_address or self.wallet_address is None:
+            return
+        if self.history_mode == "wallet":
+            self.populate_history(history, summary.txcount)
+        self.balance_label.setText(f"{summary.balance:.8f} FLOOF")
+        self.received_label.setText(f"{summary.received:.8f}")
+        self.txcount_label.setText(str(summary.txcount))
+        self.utxo_count.setText(f"Explorer UTXOs across reported pages: {len(utxos)} (spendability not verified)")
+        self.reported_utxos = tuple(utxos)
+        self.core_verified_outpoint = None
+        self.utxo_page_complete = not has_more
+        if has_more:
+            self.send_utxo_status.setText(
+                f"Explorer reports {len(utxos)} UTXO(s) on first page; more pages exist.")
+            self.coin_preview.setText(
+                "Automatic selection unavailable: explorer UTXO pagination is incomplete.")
+        else:
+            self.send_utxo_status.setText(
+                f"Explorer reports {len(utxos)} UTXO(s) across all reported pages. "
+                "Spendability NOT verified.")
+            self.coin_preview.setText(
+                "Explorer pagination complete within safety limits; "
+                "enter an amount and click Preview. Spendability NOT verified.")
+        if not history:
+            self.activity.setText("No confirmed transactions in the first page.")
+        else:
+            lines = []
+            for tx in history[:5]:
+                when = datetime.fromtimestamp(tx.timestamp, tz=timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
+                lines.append(f"{when}    {tx.txid[:12]}…    {tx.amount:.8f} FLOOF")
+            self.activity.setText("\n\n".join(lines))
+        self.status.setText(f"Explorer: {summary.source} • Read-only • Data may be stale")
+
+    def load_failed(self, error):
+        if self.requested_mode == "public":
+            if self.history_mode == "public":
+                self.history_note.setText("Could not load explorer history: " + error)
+        elif self.requested_address == self.wallet_address:
+            self.status.setText("Could not load wallet data: " + error)
+            self.reported_utxos = None
+            self.core_verified_outpoint = None
+            self.utxo_page_complete = False
+            self.send_utxo_status.setText("UTXO data unavailable — fee cannot be estimated")
+            self.coin_preview.setText("Automatic coin-selection preview: explorer data unavailable.")
+            if self.history_mode == "wallet":
+                self.history_note.setText("Could not load explorer history: " + error)
+
+
+def main():
+    app = QApplication(sys.argv)
+    app.setStyleSheet(STYLE)
+    window = WalletWindow()
+    window.show()
+    return app.exec_()
+
+
+if __name__ == "__main__":
+    sys.exit(main())
