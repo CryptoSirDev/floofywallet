@@ -524,9 +524,23 @@ class WalletWindow(QMainWindow):
         box.addWidget(label("FICTIONAL DEMO — NOT BROADCAST" if demo else "Transaction preview — NOT BROADCAST", 16, True))
         box.addWidget(label("From: " + (self.wallet_address or "Locked"), 12))
         box.addWidget(label("To: " + address, 12))
-        box.addWidget(label(f"Amount: {amount:.8f} FLOOF", 13))
-        box.addWidget(label("Estimated network fee: unavailable", 13))
-        box.addWidget(label("Total including fee: pending estimation", 15, True))
+        box.addWidget(label(f"Amount: {amount:.8f} FLOOF", 14, True))
+        if demo and 'selection' in locals():
+            box.addWidget(label("OFFLINE SIMULATION — FICTIONAL VALUES", 16, True))
+            box.addWidget(label(
+                f"Inputs: {len(selection.selected)} | Outputs: {selection.output_count} | "
+                f"Estimated size: {selection.estimated_bytes} bytes", 14, True))
+            box.addWidget(label(f"Simulated fee: {selection.estimated_fee:.8f} FLOOF", 16, True))
+            box.addWidget(label(f"Simulated change: {selection.change:.8f} FLOOF", 16, True))
+            box.addWidget(label(
+                f"Amount + simulated fee: {amount + selection.estimated_fee:.8f} FLOOF", 16, True))
+            box.addWidget(label("FICTIONAL ONLY — not a real fee quote or spendable balance.", 13, True))
+            self.coin_preview.setText("Fictional simulation results are displayed above.")
+        elif demo:
+            box.addWidget(label("Fictional simulation unavailable — see details below.", 15, True))
+        else:
+            box.addWidget(label("Estimated network fee: unavailable", 13))
+            box.addWidget(label("Total including fee: pending estimation", 15, True))
         disabled = QPushButton("Confirm send — unavailable in preview")
         disabled.setEnabled(False)
         box.addWidget(disabled)
