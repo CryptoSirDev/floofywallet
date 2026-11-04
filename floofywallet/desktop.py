@@ -121,6 +121,37 @@ class CoreCheckWorker(QObject):
             self.finished.emit("Core check failed unexpectedly")
 
 
+class CoreDiagnosticWorker(QObject):
+    finished = pyqtSignal(str)
+
+    def __init__(self, url, username, password):
+        super().__init__()
+        self.url, self.username, self.password = url, username, password
+
+    def run(self):
+        try:
+            info = LocalCoreReader(self.url, self.username, self.password).blockchain_info()
+            chain = info.get("chain")
+            blocks = info.get("blocks")
+            headers = info.get("headers")
+            ibd = info.get("initialblockdownload")
+            if chain != "main":
+                message = "WARNING: Core is not on mainnet. Check your RPC endpoint."
+            elif type(blocks) is not int or type(headers) is not int or type(ibd) is not bool:
+                message = "Core replied, but blockchain status is incomplete."
+            else:
+                state = "Syncing / initial download" if ibd else "Initial download finished"
+                message = (
+                    f"Local Core connected (mainnet). Blocks: {blocks}; "
+                    f"headers: {headers}. {state}. "
+                    "This does not verify any wallet UTXOs or guarantee full synchronization.")
+            self.finished.emit(message)
+        except (CoreReadError, ValueError, OSError) as exc:
+            self.finished.emit("Core diagnostic failed: " + str(exc))
+        except Exception:
+            self.finished.emit("Core diagnostic failed unexpectedly")
+
+
 class WalletWindow(QMainWindow):
     def __init__(self):
         super().__init__()
@@ -131,6 +162,8 @@ class WalletWindow(QMainWindow):
         self.worker = None
         self.core_thread = None
         self.core_worker = None
+        self.diagnostic_thread = None
+        self.diagnostic_worker = None
         self.core_verified_outpoint = None
         self.core_check_address = None
         self.wallet_address = None
@@ -506,6 +539,36 @@ class WalletWindow(QMainWindow):
         scroll.setWidget(w)
         return scroll
 
+    def diagnose_local_core(self):
+        if self.diagnostic_thread is not None:
+            return
+        url = self.core_url.text().strip()
+        username = self.core_user.text().strip()
+        password = self.core_password.text()
+        self.core_password.clear()
+        try:
+            LocalCoreReader(url, username, password)
+        except ValueError as exc:
+            self.core_diagnostic_status.setText(str(exc))
+            return
+        self.core_diagnostic_button.setEnabled(False)
+        self.core_diagnostic_status.setText("Connecting to local Core (read-only)...")
+        self.diagnostic_thread = QThread(self)
+        self.diagnostic_worker = CoreDiagnosticWorker(url, username, password)
+        self.diagnostic_worker.moveToThread(self.diagnostic_thread)
+        self.diagnostic_thread.started.connect(self.diagnostic_worker.run)
+        self.diagnostic_worker.finished.connect(self.core_diagnostic_status.setText)
+        self.diagnostic_worker.finished.connect(self.diagnostic_thread.quit)
+        self.diagnostic_worker.finished.connect(self.diagnostic_worker.deleteLater)
+        self.diagnostic_thread.finished.connect(self.diagnostic_thread.deleteLater)
+        self.diagnostic_thread.finished.connect(self.diagnostic_finished)
+        self.diagnostic_thread.start()
+
+    def diagnostic_finished(self):
+        self.diagnostic_thread = None
+        self.diagnostic_worker = None
+        self.core_diagnostic_button.setEnabled(True)
+
     def verify_local_core(self):
         if self.core_thread is not None:
             return
@@ -831,6 +894,14 @@ class WalletWindow(QMainWindow):
         self.core_password.setEchoMode(QLineEdit.Password)
         for field in (self.core_url, self.core_user, self.core_password):
             core_card.layout().addWidget(field)
+        self.core_diagnostic_button = QPushButton("Test local Core connection (no wallet funds required)")
+        self.core_diagnostic_button.clicked.connect(self.diagnose_local_core)
+        core_card.layout().addWidget(self.core_diagnostic_button)
+        self.core_diagnostic_status = label("Core connection not tested.", 13, True)
+        core_card.layout().addWidget(self.core_diagnostic_status)
+        core_card.layout().addWidget(label(
+            "Diagnostic uses getblockchaininfo only. It never accesses wallet keys, "
+            "sends transactions, or changes Core settings.", 12, muted=True))
         self.core_check_button = QPushButton("Verify first explorer UTXO with Local Core")
         self.core_check_button.clicked.connect(self.verify_local_core)
         core_card.layout().addWidget(self.core_check_button)
