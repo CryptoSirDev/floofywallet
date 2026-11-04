@@ -158,7 +158,6 @@ class WalletWindow(QMainWindow):
         side.addStretch()
         mascot = self.image_label("Incubator_Icon.png", 150, 150, fallback="Floofy_Icone.png")
         side.addWidget(mascot, alignment=Qt.AlignHCenter)
-        side.addWidget(label("Powered by FloofyChain", 11, muted=True), alignment=Qt.AlignHCenter)
         credit = QLabel('Made by: <a href="https://github.com/CryptoSirDev" style="color: #0879DF; text-decoration: underline;">CryptoSirDev</a>')
         credit.setAlignment(Qt.AlignCenter)
         credit.setOpenExternalLinks(True)
