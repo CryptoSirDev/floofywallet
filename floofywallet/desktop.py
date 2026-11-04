@@ -199,6 +199,35 @@ class WalletWindow(QMainWindow):
             bounds = QRegion(pix.mask()).boundingRect()
             if bounds.isValid() and not bounds.isEmpty():
                 pix = pix.copy(bounds)
+        elif filename == "Incubator_Icon.png":
+            # Some exported PNGs have opaque black padding instead of transparency.
+            # Detect it only when all four corners are nearly black.
+            sample = pix.toImage().scaled(400, 400, Qt.KeepAspectRatio, Qt.FastTransformation)
+            corners = (
+                sample.pixelColor(0, 0),
+                sample.pixelColor(sample.width() - 1, 0),
+                sample.pixelColor(0, sample.height() - 1),
+                sample.pixelColor(sample.width() - 1, sample.height() - 1),
+            )
+            if all(max(c.red(), c.green(), c.blue()) < 25 for c in corners):
+                left, top = sample.width(), sample.height()
+                right, bottom = -1, -1
+                for y in range(sample.height()):
+                    for x in range(sample.width()):
+                        c = sample.pixelColor(x, y)
+                        if max(c.red(), c.green(), c.blue()) > 35:
+                            left, top = min(left, x), min(top, y)
+                            right, bottom = max(right, x), max(bottom, y)
+                if right >= left and bottom >= top:
+                    scale_x = pix.width() / sample.width()
+                    scale_y = pix.height() / sample.height()
+                    pad_x = max(2, int((right - left + 1) * scale_x * 0.06))
+                    pad_y = max(2, int((bottom - top + 1) * scale_y * 0.06))
+                    x0 = max(0, int(left * scale_x) - pad_x)
+                    y0 = max(0, int(top * scale_y) - pad_y)
+                    x1 = min(pix.width(), int((right + 1) * scale_x) + pad_x)
+                    y1 = min(pix.height(), int((bottom + 1) * scale_y) + pad_y)
+                    pix = pix.copy(x0, y0, x1 - x0, y1 - y0)
         w.setPixmap(pix.scaled(width, height, Qt.KeepAspectRatio, Qt.SmoothTransformation))
         return w
 
