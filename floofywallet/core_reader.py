@@ -110,6 +110,19 @@ class LocalCoreReader:
             raise CoreReadError("Invalid blockchain information")
         return result
 
+    def verify_address_outpoint(self, txid, vout, expected_address, expected_amount=None):
+        """Verify an unspent output belongs to the expected P2PKH address.
+
+        Read-only: confirms the locking script, not control of private keys.
+        """
+        if not isinstance(txid, str) or len(txid) != 64 or any(
+                c not in "0123456789abcdefABCDEF" for c in txid):
+            raise ValueError("Invalid txid")
+        if type(vout) is not int or vout < 0:
+            raise ValueError("Invalid vout")
+        raw = self._call("gettxout", [txid, vout, True])
+        return verify_p2pkh_outpoint(raw, expected_address, expected_amount)
+
     def check_outpoint(self, txid, vout, expected_amount=None):
         if not isinstance(txid, str) or len(txid) != 64 or any(c not in "0123456789abcdefABCDEF" for c in txid):
             raise ValueError("Invalid txid")
