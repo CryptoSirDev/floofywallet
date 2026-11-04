@@ -23,6 +23,7 @@ import qrcode
 from .addresses import validate_address
 from .explorer_client import ExplorerClient, ExplorerError
 from .coin_selection import preview_selection
+from .decimal_input import parse_decimal_input
 from .vault import VaultError, generate_wallet, encrypt_wif, decrypt_wif, load_vault, save_vault, address_from_wif
 
 ASSETS = Path(__file__).resolve().parent / "assets"
@@ -428,7 +429,7 @@ class WalletWindow(QMainWindow):
         self.custom_fee_rate.setVisible(custom)
         self.custom_fee_rate.setEnabled(custom)
         try:
-            rate = Decimal(self.custom_fee_rate.text().strip()) if custom else Decimal("0.01000000")
+            rate = parse_decimal_input(self.custom_fee_rate.text()) if custom else Decimal("0.01000000")
             if not rate.is_finite() or rate < Decimal("0.01000000") or rate > Decimal("100"):
                 raise ValueError("Fee rate must be between 0.01000000 and 100 FLOOF/kB")
             self.fee_result.setText(
@@ -456,7 +457,7 @@ class WalletWindow(QMainWindow):
         self.amount_error.setText("")
         if amount_text:
             try:
-                value = Decimal(amount_text)
+                value = parse_decimal_input(amount_text)
                 unit = Decimal("0.00000001")
                 if not value.is_finite() or value <= 0 or value != value.quantize(unit):
                     self.amount_error.setText("Enter a positive amount with at most 8 decimal places.")
@@ -471,8 +472,8 @@ class WalletWindow(QMainWindow):
             self.clear_send_preview()
             return
         try:
-            amount = Decimal(amount_text)
-        except InvalidOperation:
+            amount = parse_decimal_input(amount_text)
+        except (InvalidOperation, ValueError):
             self.amount_error.setText("Enter a valid decimal amount.")
             self.clear_send_preview()
             return
@@ -498,7 +499,7 @@ class WalletWindow(QMainWindow):
             self.coin_preview.setText("Automatic coin selection unavailable: UTXO listing has more pages.")
         else:
             try:
-                rate = (Decimal(self.custom_fee_rate.text().strip()) if self.fee_custom.isChecked()
+                rate = (parse_decimal_input(self.custom_fee_rate.text()) if self.fee_custom.isChecked()
                         else Decimal("0.01000000"))
                 if not rate.is_finite() or rate < Decimal("0.01000000") or rate > Decimal("100"):
                     raise ValueError("Invalid reference fee rate")
